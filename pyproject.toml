@@ -16,10 +16,12 @@ dependencies = [
     "tqdm",
     "loguru",
     "xlsxwriter",
+    "openpyxl",
 ]
 
 [project.optional-dependencies]
 app = ["panel", "bokeh"]
+notebook = ["ipywidgets"]
 
 [project.scripts]
 mccs-spider = "spider.cli:main"
