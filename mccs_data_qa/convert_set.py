@@ -34,6 +34,15 @@ def convert(daq_dir, eb_id, out_dir, n_expected):
     return station_id, fn_out
 
 
+def write_set_yaml(out_dir, set_id, s_all, filelist, args, argv):
+    """ Write calibration_set.yaml (set rows, file list, args) into out_dir. """
+    info = dict(set_id=set_id,
+                set_details=json.loads(s_all.to_json(orient='records', date_format='iso')),
+                filelist=filelist, args=args, argv=argv)
+    with open(f"{out_dir}/calibration_set.yaml", 'w') as f:
+        yaml.safe_dump(info, f, sort_keys=False)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('set_id', type=int, help="Set ID from calibration_sets.xlsx")
@@ -76,11 +85,7 @@ def main():
             print(f"FAIL {eb_id}: {e}")
             bad.append(eb_id)
             filelist.append(dict(observation_id=eb_id, status='failed', error=str(e)))
-    info = dict(set_id=a.set_id,
-                set_details=json.loads(s_all.to_json(orient='records', date_format='iso')),
-                filelist=filelist, args=vars(a), argv=sys.argv)
-    with open(f"{out_dir}/calibration_set.yaml", 'w') as f:
-        yaml.safe_dump(info, f, sort_keys=False)
+    write_set_yaml(out_dir, a.set_id, s_all, filelist, vars(a), sys.argv)
     print(f"Set {a.set_id}: {len(s) - len(bad)} converted, {len(bad)} failed")
     sys.exit(bool(bad))
 

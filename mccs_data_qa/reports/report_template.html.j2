@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:ital,wght@0,300;0,400;0,600;0,700;1,400&family=Noto+Sans+Mono&display=swap">
+<style>
+  /* SKAO brand colours, in the shades of the SKAO slide template, and the Noto Sans family */
+  :root {
+    --bg: #f6f7fa; --panel: #ffffff; --border: #e3e6ee;
+    --text: #0a1d45; --muted: #5b6478; --accent: #af0b62; --brand: #0a1d45; --logo: #070068;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0 2rem 2rem; background: var(--bg); color: var(--text);
+    border-top: 6px solid; border-image: linear-gradient(100deg, #0a1d45 45%, #761a63 80%, #e20e7f) 1;
+    font-family: "Noto Sans", Verdana, sans-serif;
+  }
+  code, pre, kbd { font-family: "Noto Sans Mono", monospace; }
+  .eyebrow {
+    margin: 0; color: var(--accent); font-size: .75rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .12em;
+  }
+  .masthead {
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 2rem; padding-top: 1.5rem;
+  }
+  .masthead .logo { width: 88px; flex: none; margin-top: .25rem; }
+  .masthead .logo svg { display: block; width: 100%; height: auto; }
+  .masthead .logo path { fill: var(--logo); }
+  h1 { font-size: 2rem; font-weight: 300; margin: .2rem 0 .25rem; color: var(--brand); }
+  h2 { font-size: 1.25rem; font-weight: 300; margin: 1.5rem 0 .75rem; color: var(--brand); }
+  .subtitle { color: var(--muted); margin: 0 0 1.5rem; font-size: .9rem; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1.25rem 1.5rem; margin-bottom: 1.5rem; overflow-x: auto;
+  }
+  .info-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; margin: 0; }
+  @media (max-width: 640px) { .info-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .info-grid dt { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .12em; }
+  .info-grid dd { margin: .2rem 0 0; font-size: 1rem; }
+  .badge {
+    display: inline-block; padding: .1rem .5rem; border-radius: 999px;
+    font-size: .78rem; background: #fee2e2; color: #b91c1c; margin: .1rem .2rem 0 0;
+  }
+  table { border-collapse: collapse; font-size: .9rem; }
+  th, td { padding: .35rem .8rem; border-bottom: 1px solid var(--border); text-align: right; }
+  th:first-child, td:first-child { text-align: left; }
+  th {
+    color: var(--muted); font-weight: 600; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em;
+  }
+  .tabs {
+    display: flex; flex-wrap: wrap; gap: .5rem; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem;
+  }
+  .tab-btn {
+    background: none; border: none; color: var(--muted); padding: .6rem 1rem; font: inherit;
+    font-size: .95rem; cursor: pointer; border-bottom: 2px solid transparent;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .fig-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 1rem; }
+  .tab-panel img {
+    max-width: 100%; border-radius: 8px; border: 1px solid var(--border); background: #fff; cursor: zoom-in;
+  }
+  .tab-panel figure { margin: 0 0 1rem; }
+  .tab-panel figcaption { color: var(--muted); font-size: .85rem; margin-top: .4rem; }
+  a { color: var(--accent); }
+  .reports { display: flex; gap: 1.25rem; flex-wrap: wrap; padding-top: 1rem; font-size: .9rem; }
+  .reports a { color: var(--muted); text-decoration: none; }
+  .reports a:hover { color: var(--text); }
+  .reports .current { color: var(--text); font-weight: 600; box-shadow: inset 0 -2px var(--accent); }
+  /* QA marks from report_ui: Pantone 346 C, 374 C, 393 C, 178 C, 428 C */
+  .qa-pass, .qa-healthy { --qa: #71cc98; }
+  .qa-mostly_healthy { --qa: #c5e86c; }
+  .qa-degraded { --qa: #f0ec74; }
+  .qa-fail { --qa: #ff585d; }
+  .qa-stale { --qa: #c1c6c8; }
+  .qa-dot {
+    display: inline-block; width: .6rem; height: .6rem; border-radius: 50%; margin-right: .35rem;
+    background: var(--qa);
+  }
+  .qa-banner {
+    display: inline-block; margin: 0 0 1rem; padding: .3rem .8rem; border-radius: 999px;
+    font-size: .85rem; background: var(--qa); color: var(--text);
+  }
+  /* A clicked plot, full size */
+  #lightbox {
+    padding: 0; border: 0; background: transparent; max-width: 95vw; max-height: 95vh; overflow: visible;
+  }
+  #lightbox::backdrop { background: rgba(10, 29, 69, .75); }
+  #lightbox img { display: block; max-width: 95vw; max-height: 95vh; border-radius: 8px; background: #fff; }
+  #lightbox button {
+    position: absolute; top: .5rem; right: .5rem; width: 2rem; height: 2rem; border: 0; border-radius: 50%;
+    font-size: 1.4rem; line-height: 1; cursor: pointer; color: var(--text);
+    background: rgba(255, 255, 255, .85);
+  }
+</style>
+</head>
+<body>
+{% if nav %}
+  <nav class="reports">
+{% for name in nav %}
+    <a href="{{ nav_prefix }}{{ name }}/index.html"{{ ' class="current"' if name == current }}>{{ name }}</a>
+{% endfor %}
+  </nav>
+{% endif %}
+  <header class="masthead">
+    <div>
+      <p class="eyebrow">{{ set_name or 'SKA-Low UV report' }}</p>
+      <h1>{{ title }}</h1>
+      <p class="subtitle">Generated {{ generated_at }} &middot; {{ version }}</p>
+    </div>
+    <div class="logo" role="img" aria-label="SKAO">{% include 'skao_logo.svg' %}</div>
+  </header>
+
+  <div class="card">
+    <dl class="info-grid">
+{% for label, value in info %}
+      <div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
+{% endfor %}
+    </dl>
+    {{ card_extra }}
+  </div>
+
+  <div class="tabs">
+{% for tid, label, _ in tabs %}
+    <button class="tab-btn{{ ' active' if loop.first }}" data-tab="{{ tid }}">{{ label }}</button>
+{% endfor %}
+  </div>
+{% for tid, _, body in tabs %}
+  <div class="tab-panel{{ ' active' if loop.first }}" id="{{ tid }}">{{ body }}</div>
+{% endfor %}
+  <dialog id="lightbox"><button type="button" aria-label="Close" title="Close">&times;</button><img alt=""></dialog>
+
+<script>
+  // Hide links to reports of this set that have not been run (no-op under file://, where fetch fails)
+  document.querySelectorAll('.reports a:not(.current)').forEach(a => {
+    fetch(a.href, { method: 'HEAD' }).then(r => { if (!r.ok) a.remove(); }).catch(() => {});
+  });
+  // QA mark of the run in a folder, 'stale' if it was made on an earlier run, or null if unreviewed
+  async function qaMark(base) {
+    const get = f => fetch(base + f).then(r => (r.ok ? r.json() : {})).catch(() => ({}));
+    const [qa, run] = await Promise.all([get('qa.json'), get('run.json')]);
+    if (!qa.status) return null;
+    const current = run.started === undefined || run.started === qa.run_started;
+    return { ...qa, status: current ? qa.status : 'stale' };
+  }
+  document.querySelectorAll('.reports a').forEach(a => {
+    qaMark(a.href.replace(/index\.html$/, '')).then(m => {
+      if (!m) return;
+      const dot = document.createElement('span');
+      dot.className = `qa-dot qa-${m.status}`;
+      dot.title = `QA ${m.status.replace('_', ' ')}`;
+      a.prepend(dot);
+    });
+  });
+  qaMark('').then(m => {
+    if (!m) return;
+    const p = document.createElement('p');
+    p.className = `qa-banner qa-${m.status}`;
+    // Stations not marked healthy or pass
+    const bad = Object.entries(m.stations || {}).filter(([, s]) => s.status && !['healthy', 'pass'].includes(s.status));
+    const notes = bad.map(([st, s]) => `${st} ${s.status.replace('_', ' ')}${s.note ? ` (${s.note})` : ''}`).join(', ');
+    const detail = m.note || notes;
+    p.textContent = `QA ${m.status.replace('_', ' ')}${m.by ? ` (${m.by})` : ''}${detail ? `: ${detail}` : ''}`;
+    document.querySelector('.masthead > div').append(p);
+  });
+  // A plot opens full size in a modal, closed by its X, Esc, or a click outside it
+  const lightbox = document.getElementById('lightbox');
+  document.addEventListener('click', e => {
+    const img = e.target.closest('.tab-panel img');
+    if (!img) return;
+    e.preventDefault();
+    lightbox.querySelector('img').src = img.src;
+    lightbox.querySelector('img').alt = img.alt;
+    lightbox.showModal();
+  });
+  lightbox.addEventListener('click', e => {
+    if (e.target === lightbox || e.target.closest('button')) lightbox.close();
+  });
+  // Each .tabs row switches only its own panels, so tab rows can nest
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.parentElement.querySelectorAll('.tab-btn').forEach(b => {
+        b.classList.remove('active');
+        document.getElementById(b.dataset.tab).classList.remove('active');
+      });
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.tab).classList.add('active');
+    });
+  });
+</script>
+</body>
+</html>
