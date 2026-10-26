@@ -3,9 +3,9 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mccs-spider-search"
+name = "mccs-data-qa"
 version = "0.1.0"
-description = "Spider SKA-Low MCCS HDF5 observation metadata into a CSV database, with a Panel viewer"
+description = "Spider SKA-Low MCCS HDF5 observation metadata into a CSV database, and run QA reports on calibration sets"
 requires-python = ">=3.9"
 dependencies = [
     "pandas",
@@ -22,11 +22,23 @@ dependencies = [
 [project.optional-dependencies]
 app = ["panel", "bokeh"]
 notebook = ["ipywidgets"]
+# ska-ost-low-uv needs python 3.11+; the base install stays light for the MCCS host
+reports = [
+    "ska-ost-low-uv[postx] @ git+https://gitlab.com/ska-telescope/ost/ska-ost-low-uv.git@main ; python_version >= '3.11'",
+    "nicegui>=3 ; python_version >= '3.11'",
+    "jinja2>=3.1 ; python_version >= '3.11'",
+    "hickle>=5 ; python_version >= '3.11'",
+    "matplotlib ; python_version >= '3.11'",
+]
 
 [project.scripts]
-mccs-spider = "spider.cli:main"
-mccs-analyse = "spider.analyse:cli"
-mccs-convert-set = "spider.convert_set:main"
+mccs-spider = "mccs_data_qa.cli:main"
+mccs-analyse = "mccs_data_qa.analyse:cli"
+mccs-convert-set = "mccs_data_qa.convert_set:main"
+mccs-report-ui = "mccs_data_qa.reports.report_ui:main"
 
 [tool.setuptools]
-packages = ["spider"]
+packages = ["mccs_data_qa", "mccs_data_qa.reports"]
+
+[tool.setuptools.package-data]
+"mccs_data_qa.reports" = ["*.j2", "*.svg", "*.md"]

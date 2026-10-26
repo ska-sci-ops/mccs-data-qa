@@ -1,7 +1,9 @@
-# mccs-spider-search
+# mccs-data-qa
 
-* spider/ (`mccs-spider`): Runs on MCCS server, extracts HDF5 file metadata and creates database.
-* spider/analyse.py (`mccs-analyse`): Builds the analysis workbook (sweep QA, coverage histograms, calibration sets) from `db/latest.csv`.
+* mccs_data_qa/ (`mccs-spider`): Runs on MCCS server, extracts HDF5 file metadata and creates database.
+* mccs_data_qa/analyse.py (`mccs-analyse`): Builds the analysis workbook (sweep QA, coverage histograms, calibration sets) from `db/latest.csv`.
+* mccs_data_qa/convert_set.py (`mccs-convert-set`): Converts every sweep in a calibration set to UVX, with a `calibration_set.yaml`.
+* mccs_data_qa/reports/ (`mccs-report-ui`): Web UI and scripts for QA reports (quicklook, stefcal, delay fit, Sun holography, sensitivity) on calibration sets.
 * app.py: Runs on scs server, simple Panel app to view the MCCS observation database.
 
 ### Usage
@@ -38,3 +40,20 @@ To start the web app, run `start.sh` on the SCS01 server:
 
 To update the DB on scs01, run the `update_db.sh` script.
 
+
+### Reports
+
+The reports need the `reports` extra (python 3.11+, pulls ska-ost-low-uv from GitLab):
+
+```
+uv pip install '.[reports]'
+```
+
+Convert a calibration set, then browse to its parent folder in the report UI:
+
+```
+mccs-convert-set 614 --out-dir sweeps
+mccs-report-ui --root sweeps    # then open http://127.0.0.1:8080
+```
+
+Each script also runs on its own, e.g. `python -m mccs_data_qa.reports.run_stefcal --help`.
