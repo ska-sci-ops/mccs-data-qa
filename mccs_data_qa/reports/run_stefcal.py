@@ -65,6 +65,7 @@ def _calibrate_sweep(
     leakage: str = 'solve',
     beam: str = 'aep-harp',
     suncal_kwargs: dict | None = None,
+    nside: int = 128,
     reuse: bool = False,
     ignore_static_flags: bool = False,
     flag_freqs: list | None = None,
@@ -86,6 +87,7 @@ def _calibrate_sweep(
         leakage (str): 'solve' for full-Jones gains, 'none' for diagonal gains.
         beam (str): Element pattern, a key of `report.BEAMS`.
         suncal_kwargs (dict): Extra suncal() options.
+        nside (int): Healpix NSIDE of the sky model.
         reuse (bool): Keep an existing cal file instead of recalibrating.
         ignore_static_flags (bool): Ignore the static antenna flags stored in the UVX file.
         flag_freqs (list): (start, stop) Quantity frequency ranges to flag, e.g. known RFI bands.
@@ -111,7 +113,7 @@ def _calibrate_sweep(
 
         def cal_channel(aa):
             cal, dg = calibrate_channel(
-                aa, cal_model, leakage, beam, sky_model, sigma_thr, flags, suncal_kwargs
+                aa, cal_model, leakage, beam, sky_model, sigma_thr, flags, suncal_kwargs, nside
             )
             if 'suncal' in cal.provenance:
                 suns.append(cal.provenance['suncal'])
@@ -216,6 +218,7 @@ def run_stefcal(
     leakage: str = 'solve',
     beam: str = 'aep-harp',
     suncal_kwargs: dict | None = None,
+    nside: int = 128,
     n_jobs: int = 4,
     reuse_cal: bool = False,
     ignore_static_flags: bool = False,
@@ -245,7 +248,7 @@ def run_stefcal(
     Returns:
         index_fn (Path): The run's index.html.
     """
-    outdir_path = Path(outdir) / cal_variant(cal_model, leakage, beam, sky_model)
+    outdir_path = Path(outdir) / cal_variant(cal_model, leakage, beam, sky_model, nside)
     outdir_path.mkdir(parents=True, exist_ok=True)
 
     # Each station is independent; a worker holds one station in memory
@@ -259,6 +262,7 @@ def run_stefcal(
             leakage=leakage,
             beam=beam,
             suncal_kwargs=suncal_kwargs,
+            nside=nside,
             reuse=reuse_cal,
             ignore_static_flags=ignore_static_flags,
             flag_freqs=flag_freqs,
@@ -285,6 +289,7 @@ def run_stefcal(
         cli_args = {
             'sigma_thr': sigma_thr,
             'sky_model': sky_model,
+            'nside': nside,
             'cal_model': cal_model,
             'leakage': leakage,
             'beam': beam,
@@ -453,6 +458,13 @@ def build_parser() -> argparse.ArgumentParser:
         '--n-jobs', type=int, default=4, help='Stations calibrated in parallel (~3 GB RAM each)'
     )
     parser.add_argument(
+        '--nside',
+        type=int,
+        choices=[16, 32, 64, 128, 256],
+        default=128,
+        help='Healpix NSIDE of the sky model; higher is finer but slower',
+    )
+    parser.add_argument(
         '--reuse-cal',
         action='store_true',
         help='Keep existing {station}.cal files in the run folder instead of recalibrating',
@@ -482,6 +494,7 @@ def main():
         leakage=args.leakage,
         beam=args.beam,
         suncal_kwargs=suncal_kwargs_from_args(args),
+        nside=args.nside,
         n_jobs=args.n_jobs,
         reuse_cal=args.reuse_cal,
         ignore_static_flags=args.ignore_static_flags,

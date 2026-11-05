@@ -70,7 +70,7 @@ from ska_ost_low_uv.utils import AppendFileSink
 
 STEPS = ['image', 'check', 'sens', 'plot', 'html']
 AEP = 'ska_low_harp'
-NSIDE_SIM = 128  # AEP sampling, must match the make_healpix n_side
+NSIDE_SIM = 128  # Default healpix NSIDE of the images and AEP sampling (--nside)
 NSIDE_COARSE = 8  # Cell size for local noise estimates (~7 deg)
 NSIDE_JK = 4  # Jackknife cells (~15 deg), larger than the PSF at 50 MHz
 FOV_DEG = 45  # Zenith cap used for the headline numbers
@@ -191,7 +191,7 @@ def n_samples(aa: ApertureArray) -> float:
     return ETA * aa.uvx.data.frequency.attrs['channel_bandwidth'] * aa.uvx.data.time.attrs['resolution']
 
 
-def zenith_disc(aa: ApertureArray, radius_deg: float, nside: int = NSIDE_SIM) -> tuple:
+def zenith_disc(aa: ApertureArray, radius_deg: float, nside: int) -> tuple:
     """Healpix pixels within radius_deg of zenith, and their zenith angles in radians."""
     vec_zen = np.array(hp.pix2vec(nside, sky2hpix(nside, aa.coords.get_zenith())))
     pix = hp.query_disc(nside, vec_zen, radius=np.radians(radius_deg))
@@ -199,7 +199,7 @@ def zenith_disc(aa: ApertureArray, radius_deg: float, nside: int = NSIDE_SIM) ->
     return pix, za
 
 
-def diagonal_pixel(aa: ApertureArray, vis_pix: np.ndarray, za_deg: float = DIAG_ZA_DEG) -> int:
+def diagonal_pixel(aa: ApertureArray, vis_pix: np.ndarray, nside: int, za_deg: float = DIAG_ZA_DEG) -> int:
     """Index into vis_pix of the direction za_deg from zenith at station-frame phi = 45 deg.
 
     phi = 45 deg is midway between the X (phi = 0) and Y (phi = 90) dipoles, at azimuth 45 deg + station rotation.
@@ -207,7 +207,7 @@ def diagonal_pixel(aa: ApertureArray, vis_pix: np.ndarray, za_deg: float = DIAG_
     zen = aa.coords.get_zenith()
     az = 45 + float(aa.uvx.antennas.array_rotation_angle)
     altaz = AltAz(alt=(90 - za_deg) * u.deg, az=az * u.deg, obstime=zen.obstime, location=zen.location)
-    return int(np.flatnonzero(vis_pix == sky2hpix(NSIDE_SIM, SkyCoord(altaz)))[0])
+    return int(np.flatnonzero(vis_pix == sky2hpix(nside, SkyCoord(altaz)))[0])
 
 
 def to_coherency(x: np.ndarray) -> np.ndarray:
@@ -232,14 +232,14 @@ def quad_trace(w: np.ndarray, x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return np.einsum('...ab,...bc,...dc,...da->...', w, x, w.conj(), y).real
 
 
-def load_jones(aa: ApertureArray, pix: np.ndarray) -> np.ndarray:
+def load_jones(aa: ApertureArray, pix: np.ndarray, nside: int) -> np.ndarray:
     """AEP Jones matrices (npix, 2, 2) at healpix pixels `pix`, for the current channel.
 
     The Y row is negated, which negates XY in J J^H to match the imager, as in load_eep_for_sim().
     """
     jones = load_aep_jones(
         aa.f[aa.idx['f']].to('MHz').value,
-        NSIDE_SIM,
+        nside,
         AEP,
         sky_coord=aa.coords.get_zenith(),
         rot_angle=aa.uvx.antennas.array_rotation_angle,
@@ -383,9 +383,9 @@ def sys_req_lines(f_mhz: np.ndarray, kind: str, n_stations: int = 1) -> list:
     return lines
 
 
-def coarse_reduce(values: np.ndarray, pix: np.ndarray, fn) -> np.ndarray:
+def coarse_reduce(values: np.ndarray, pix: np.ndarray, fn, nside: int) -> np.ndarray:
     """Apply fn to `values` within each coarse healpix cell; NaN for empty cells."""
-    cell = hp.vec2pix(NSIDE_COARSE, *hp.pix2vec(NSIDE_SIM, pix))
+    cell = hp.vec2pix(NSIDE_COARSE, *hp.pix2vec(nside, pix))
     out = np.full(hp.nside2npix(NSIDE_COARSE), np.nan)
     for idx in np.unique(cell):
         out[idx] = fn(values[cell == idx])
@@ -400,19 +400,21 @@ def calibrated_autos(aa: ApertureArray, V: np.ndarray) -> tuple:
     return good, pol_coherency(V[diag])
 
 
-def run_image(aa: ApertureArray, prefix: str):
+def run_image(aa: ApertureArray, prefix: str, nside: int = NSIDE_SIM):
     """Write calibrated healpix cubes at t=0 and t=1, and their difference."""
     hpx = []
     for t in (0, 1):
         logger.info(f'[image] {aa.name}: healpix cube at t={t}')
         aa.set_idx(t=t)
-        hpx.append(aa.imaging.make_healpix(vis='cal', include_autos=False, channel_range='all'))
+        hpx.append(aa.imaging.make_healpix(
+                n_side=nside, vis='cal', include_autos=False, channel_range='all'
+            ))
         write_img(hpx[-1], f'{prefix}_hpx_t{t}.h5')
     write_img(hpx[0] - hpx[1], f'{prefix}_hpx_diff.h5')
     logger.info(f'[image] {aa.name}: wrote {prefix}_hpx_{{t0,t1,diff}}.h5')
 
 
-def run_check(aa: ApertureArray, n_real: int = 10, seed: int = 42):
+def run_check(aa: ApertureArray, n_real: int = 10, seed: int = 42, nside: int = NSIDE_SIM):
     """Image thermal noise drawn from the calibrated autos; S / sigma_pred should have unit std at all ZA."""
     logger.info(f'[check] {aa.name}: noise injection, {n_real} realisations')
     rng = np.random.default_rng(seed)
@@ -427,8 +429,8 @@ def run_check(aa: ApertureArray, n_real: int = 10, seed: int = 42):
         L = np.zeros(P.shape, dtype='complex128')
         L[good] = np.linalg.cholesky(P[good])
 
-        vis_pix, za = zenith_disc(aa, MAX_ZA_DEG)
-        m = stokes_weights(load_jones(aa, vis_pix))
+        vis_pix, za = zenith_disc(aa, MAX_ZA_DEG, nside)
+        m = stokes_weights(load_jones(aa, vis_pix, nside))
         sigma_pred = {s: stokes_noise(w, P[good], n_samp) for s, w in m.items()}
         iu = np.triu_indices(aa.n_ant, 1)
         diag = np.diag_indices(aa.n_ant)
@@ -444,7 +446,7 @@ def run_check(aa: ApertureArray, n_real: int = 10, seed: int = 42):
             V_noise[diag] = 0
             V_noise = V_noise.reshape(aa.n_ant, aa.n_ant, 4)
 
-            img = np.ma.filled(aa.imaging.make_healpix(vis=V_noise), np.nan)[vis_pix]
+            img = np.ma.filled(aa.imaging.make_healpix(n_side=nside, vis=V_noise), np.nan)[vis_pix]
             for s, w in m.items():
                 z[s].append(stokes_estimate(w, img) / sigma_pred[s])
     za = np.tile(za, n_real)
@@ -458,7 +460,7 @@ def run_check(aa: ApertureArray, n_real: int = 10, seed: int = 42):
             )
 
 
-def run_sens(aa: ApertureArray, sky_model: str, prefix: str):
+def run_sens(aa: ApertureArray, sky_model: str, prefix: str, nside: int = NSIDE_SIM):
     """Element and station SEFD and A/T per channel, per pol and Stokes I, Q, U, V, write hkl and csv."""
     logger.info(f'[sens] {aa.name}: {len(aa.f)} channels')
     cal_flags = aa.cal.flags.channel.values.copy()
@@ -468,20 +470,20 @@ def run_sens(aa: ApertureArray, sky_model: str, prefix: str):
     rho_maps, sefd_maps, ratio_maps = [], [], []
 
     hpxd = read_img(f'{prefix}_hpx_diff.h5')
-    assert hp.npix2nside(hpxd.shape[-2]) == NSIDE_SIM
+    assert hp.npix2nside(hpxd.shape[-2]) == nside
     M = n_samples(aa)
     aa.set_idx(t=0)
 
-    zen_pix, _ = zenith_disc(aa, FOV_DEG)
+    zen_pix, _ = zenith_disc(aa, FOV_DEG, nside)
     # The sim integrates the AEP over above-horizon pixels only
-    above, _ = zenith_disc(aa, 90)
-    pix_area = hp.nside2pixarea(NSIDE_SIM)
+    above, _ = zenith_disc(aa, 90, nside)
+    pix_area = hp.nside2pixarea(nside)
 
-    vis_pix, za = zenith_disc(aa, MAX_ZA_DEG)
+    vis_pix, za = zenith_disc(aa, MAX_ZA_DEG, nside)
     in_fov = za < np.radians(FOV_DEG)
     i_zen = np.argmin(za)
-    i_diag = diagonal_pixel(aa, vis_pix)
-    jk_cells = hp.vec2pix(NSIDE_JK, *hp.pix2vec(NSIDE_SIM, vis_pix[in_fov]))
+    i_diag = diagonal_pixel(aa, vis_pix, nside)
+    jk_cells = hp.vec2pix(NSIDE_JK, *hp.pix2vec(nside, vis_pix[in_fov]))
     # The dirty sky images give the cross-correlation phased to each pixel
     h5_t = [h5py.File(f'{prefix}_hpx_t{t}.h5', 'r') for t in (0, 1)]
     # The model sky includes the Sun at the flux suncal fitted, so T_ant includes it
@@ -510,10 +512,10 @@ def run_sens(aa: ApertureArray, sky_model: str, prefix: str):
                     )
                 }
             V_sky = aa.simulation.sim_vis_gsm(
-                sky_model=sky_model, as_xarray=False, units='Jysr', extended_sources=sun_src
+                sky_model=sky_model, as_xarray=False, units='Jysr', extended_sources=sun_src, nside=nside
             )
-            aep = np.asarray(load_aep_for_sim(aa, NSIDE_SIM, AEP))
-            m = stokes_weights(load_jones(aa, vis_pix))
+            aep = np.asarray(load_aep_for_sim(aa, nside, AEP))
+            m = stokes_weights(load_jones(aa, vis_pix, nside))
 
             good, p_cal = calibrated_autos(aa, V_cal)
             p_auto = p_cal[good]
@@ -571,7 +573,7 @@ def run_sens(aa: ApertureArray, sky_model: str, prefix: str):
                 z = stokes_estimate(w, d) / np.sqrt(2) / image_noise(w, p_el, s_img, n_ant, M)
                 row[f'rho_{st}'], row[f'rho_{st}_err'] = robust_std_jackknife(z[in_fov], jk_cells)
                 if st == 'i':
-                    rho_maps.append(coarse_reduce(z, vis_pix, robust_std))
+                    rho_maps.append(coarse_reduce(z, vis_pix, robust_std, nside))
             sigma_pred = stokes_noise(m['i'], p_auto, M)
             row['rho_i_unc'] = robust_std((stokes_estimate(m['i'], d) / np.sqrt(2) / sigma_pred)[in_fov])
 
@@ -585,7 +587,7 @@ def run_sens(aa: ApertureArray, sky_model: str, prefix: str):
             sefd_st_pred = sefd_from_power(m['i'][i_zen], p_st)
             sefd_i_el = rho * sefd_pred[i_zen]
             sefd_i_st = rho * sefd_st_pred
-            sefd_maps.append(coarse_reduce(sefd_pred, vis_pix, np.nanmedian))
+            sefd_maps.append(coarse_reduce(sefd_pred, vis_pix, np.nanmedian, nside))
 
             # A/T_I = sqrt(2) k / SEFD_I, equal to the per-pol A/T for balanced pols
             a_el = TWO_K_JY / np.sqrt(2) / sefd_i_el
@@ -614,7 +616,7 @@ def run_sens(aa: ApertureArray, sky_model: str, prefix: str):
             for st in ('i', *QUV):
                 pred = element_sefd(stokes_noise(m[st], p_auto, M), n_ant, M)
                 if st != 'i':
-                    ratios.append(coarse_reduce(pred / sefd_pred, vis_pix, np.nanmedian))
+                    ratios.append(coarse_reduce(pred / sefd_pred, vis_pix, np.nanmedian, nside))
                     row[f'sefd_{st}_el'] = float(rho * pred[i_zen])
                     row[f'sefd_{st}_st'] = float(rho * sefd_from_power(m[st][i_zen], p_st))
                 row[f'sefd_{st}_el_diag'] = float(rho * pred[i_diag])
@@ -1129,11 +1131,11 @@ def process_station(fname: str, key: str, args: argparse.Namespace, first: bool)
         delay = os.path.join(args.delay_caldir, f'{key}_delay.cal') if args.delay_caldir else None
         aa = load_aa(fname, os.path.join(args.caldir, f'{key}.cal'), args.ignore_static_flags, delay)
         if 'image' in args.steps:
-            run_image(aa, prefix)
+            run_image(aa, prefix, args.nside)
         if 'check' in args.steps and first:
-            run_check(aa)
+            run_check(aa, nside=args.nside)
         if 'sens' in args.steps:
-            run_sens(aa, args.sky_model, prefix)
+            run_sens(aa, args.sky_model, prefix, args.nside)
         del aa
         release()
 
@@ -1164,6 +1166,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         '--spike-thr', type=float, default=5, help='Flag SEFD_I spikes above this many robust sigma (plot/html)'
+    )
+    p.add_argument(
+        '--nside',
+        type=int,
+        choices=[16, 32, 64, 128, 256],
+        default=NSIDE_SIM,
+        help='Healpix NSIDE of the images and AEP sampling; higher is finer but slower and larger',
     )
     p.add_argument('--plot-chan', type=int, default=150, help='Channel index for the rho / SEFD_I maps')
     p.add_argument(

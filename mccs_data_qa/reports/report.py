@@ -262,10 +262,15 @@ def check_cal_args(parser: argparse.ArgumentParser, args: argparse.Namespace):
         parser.error(problem)
 
 
-def cal_variant(cal_model: str, leakage: str, beam: str, sky_model: str = 'gsm16') -> str:
-    """Folder name of a stefcal run with these options, e.g. 'sun-gsm16_leakage_aep-harp'."""
+def cal_variant(cal_model: str, leakage: str, beam: str, sky_model: str = 'gsm16', nside: int = 128) -> str:
+    """Folder name of a stefcal run with these options, e.g. 'sun-gsm16_leakage_aep-harp'.
+
+    A non-default NSIDE is appended, e.g. '_nside64'.
+    """
     model = {'sun+sky': f'sun-{sky_model}', 'sky': sky_model, 'sun': 'sun'}[cal_model]
-    return f'{model}_{"leakage" if leakage == "solve" else "noleakage"}_{beam}'
+    return f'{model}_{"leakage" if leakage == "solve" else "noleakage"}_{beam}' + (
+        f'_nside{nside}' if nside != 128 else ''
+    )
 
 
 def station_cal_model(aa, cal_model: str) -> str:
@@ -290,6 +295,7 @@ def calibrate_channel(
     sigma_thr: float,
     antenna_flags=None,
     suncal_kwargs: dict | None = None,
+    nside: int = 128,
 ):
     """Calibrate the selected channel of a station.
 
@@ -302,6 +308,7 @@ def calibrate_channel(
         sigma_thr (float): Antenna gain outlier threshold.
         antenna_flags (np.ndarray): Antenna flags.
         suncal_kwargs (dict): suncal() options.
+        nside (int): Healpix NSIDE of the sky model.
 
     Returns:
         cal (UVXAntennaCal): The calibration.
@@ -309,7 +316,7 @@ def calibrate_channel(
             for diagonal gains.
     """
     suncal_kwargs = suncal_kwargs or {}
-    common = {'sigma_thr': sigma_thr, 'antenna_flags': antenna_flags, **BEAMS[beam]}
+    common = {'sigma_thr': sigma_thr, 'antenna_flags': antenna_flags, 'nside': nside, **BEAMS[beam]}
     if cal_model == 'sun+sky':
         cal = suncal(aa, diffuse_model=sky_model, **common, **suncal_kwargs)
     else:

@@ -266,7 +266,7 @@ def run_dir(setdir: Path, name: str, values: dict | None = None) -> Path:
     if name == 'holo_suncal':
         return report_dir(setdir, name) / HOLO_RUN
     if name == 'calibration' and values:
-        run = cal_variant(values['cal_model'], values['leakage'], values['beam'], values['sky_model'])
+        run = cal_variant(values['cal_model'], values['leakage'], values['beam'], values['sky_model'], values['nside'])
         return report_dir(setdir, name) / run
     return report_dir(setdir, name)
 
