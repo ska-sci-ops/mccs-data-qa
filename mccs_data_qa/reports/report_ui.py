@@ -234,11 +234,10 @@ STATE = {'dir': DEFAULT_ROOT, 'set': None, 'initials': ''}
 def url(path: Path) -> str:
     """URL of a file in a reports folder, versioned by its modification time so a rewrite is never cached.
 
-    Behind a proxy that strips a path prefix and sends it as X-Forwarded-Prefix (jupyter-server-proxy in
-    JupyterHub, at <hub>/user/<name>/proxy/<port>/), the URL starts with that prefix, as NiceGUI's own do.
+    Relative to the page (served only at '/'), so it resolves under any proxy prefix, e.g. JupyterHub's
+    <hub>/user/<name>/proxy/<port>/, without needing the proxy to send X-Forwarded-Prefix.
     """
-    prefix = quote(ui.context.client.request.headers.get('X-Forwarded-Prefix', ''), safe="/:@!$&'()*+,;=%")
-    return f'{prefix.rstrip("/")}/files{quote(path.resolve().as_posix())}?v={path.stat().st_mtime_ns}'
+    return f'files{quote(path.resolve().as_posix())}?v={path.stat().st_mtime_ns}'
 
 
 @app.api_route('/files/{path:path}', methods=['GET', 'HEAD'])
