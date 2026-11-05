@@ -22,8 +22,8 @@ def get_eb(daq_dir, eb_id, n_expected):
 
 
 def convert(daq_dir, eb_id, out_dir, n_expected):
-    # ponytail: lazy import, these only exist on the DAQ / jupyter host
-    import hdf5plugin  # noqa: F401
+    # ponytail: lazy import, this only exists on the DAQ / jupyter host
+    # hdf5_sweep_to_uvx writes zstd by default; ska_ost_low_uv.io imports hdf5plugin itself
     from ska_ost_low_uv.io import hdf5_sweep_to_uvx, get_hdf5_metadata
 
     dirpath = get_eb(daq_dir, eb_id, n_expected)
