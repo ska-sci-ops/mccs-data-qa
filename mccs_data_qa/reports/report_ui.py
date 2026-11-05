@@ -10,6 +10,8 @@ shared across sets, managed in the Queue tab. Quicklooks go to the front of the 
 
 Usage:
     mccs-report-ui [--root DIR] [--port 8080] # then open http://127.0.0.1:8080
+
+In JupyterHub (needs jupyter-server-proxy), open <hub>/user/<name>/proxy/8080/ instead.
 """
 
 import argparse
@@ -230,8 +232,13 @@ STATE = {'dir': DEFAULT_ROOT, 'set': None, 'initials': ''}
 
 
 def url(path: Path) -> str:
-    """URL of a file in a reports folder, versioned by its modification time so a rewrite is never cached."""
-    return f'/files{quote(path.resolve().as_posix())}?v={path.stat().st_mtime_ns}'
+    """URL of a file in a reports folder, versioned by its modification time so a rewrite is never cached.
+
+    Behind a proxy that strips a path prefix and sends it as X-Forwarded-Prefix (jupyter-server-proxy in
+    JupyterHub, at <hub>/user/<name>/proxy/<port>/), the URL starts with that prefix, as NiceGUI's own do.
+    """
+    prefix = quote(ui.context.client.request.headers.get('X-Forwarded-Prefix', ''), safe="/:@!$&'()*+,;=%")
+    return f'{prefix.rstrip("/")}/files{quote(path.resolve().as_posix())}?v={path.stat().st_mtime_ns}'
 
 
 @app.api_route('/files/{path:path}', methods=['GET', 'HEAD'])
@@ -1501,6 +1508,8 @@ def main():
     cli.add_argument('--port', type=int, default=8080)
     opts = cli.parse_known_args()[0]
     STATE['dir'] = opts.root.expanduser().resolve()
+    if hub := os.environ.get('JUPYTERHUB_SERVICE_PREFIX'):
+        print(f'In JupyterHub, open {hub}proxy/{opts.port}/ (needs jupyter-server-proxy)', flush=True)
     # 127.0.0.1, as the default 0.0.0.0 would expose a no-login launcher of arbitrary report jobs
     ui.run(host='127.0.0.1', port=opts.port, reload=False, show=False, title='SKA-Low UV reports')
 

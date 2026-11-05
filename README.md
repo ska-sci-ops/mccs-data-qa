@@ -56,4 +56,10 @@ mccs-convert-set 614 --out-dir sweeps
 mccs-report-ui --root sweeps    # then open http://127.0.0.1:8080
 ```
 
+On the MCCS JupyterHub, start the UI from a hub terminal and open it through jupyter-server-proxy,
+at `https://k8s.mccs.low.internal.skao.int/jupyterhub/user/<name>/proxy/8080/` (`mccs-report-ui` prints the path). If `pip show jupyter-server-proxy` finds nothing, `pip install --user
+jupyter-server-proxy` and restart your server from the Hub Control Panel. The UI stops when the
+terminal closes or the server is culled; `nohup mccs-report-ui --root sweeps > report_ui.log 2>&1 &`
+keeps it past the terminal.
+
 Each script also runs on its own, e.g. `python -m mccs_data_qa.reports.run_stefcal --help`.
