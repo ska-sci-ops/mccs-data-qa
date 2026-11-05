@@ -84,6 +84,17 @@ ZOOM_ALL_MHZ = (100, 330)
 ARRAYS = {'AA*(mod)': 257, 'AA*': 307, 'AA4': 512}  # Number of stations
 N_STATION_ANT = 256
 TWO_K_JY = 2 * k_B.value * 1e26  # 2k in Jy m^2 K^-1
+# SKAO-SYS_REQ-2135: minimum SKA-Low (512-station) naturally weighted A/T averaged over both polarisations
+# [m^2 K^-1], at zenith and averaged over El > 45 deg, 0 < Az < 360 deg. Linear interpolation between values.
+SYS_REQ_F_MHZ = np.arange(50, 351, 10)
+SYS_REQ_ZENITH = np.array([
+    68, 83, 141, 232, 342, 449, 531, 572, 584, 588, 598, 610, 619, 624, 625, 623, 619, 614, 608, 602,
+    595, 588, 582, 576, 570, 565, 558, 549, 537, 522, 516,
+])  # fmt: skip
+SYS_REQ_AVERAGE = np.array([
+    56, 68, 115, 190, 280, 368, 435, 469, 479, 482, 490, 500, 508, 511, 512, 511, 508, 504, 499, 493,
+    488, 483, 477, 472, 468, 463, 457, 450, 441, 428, 423,
+])  # fmt: skip
 # Stokes selection matrices, S = tr(P_S e e^H) (Sutinjo et al. 2022, Eqs. 4-13)
 P_S = {
     'i': np.eye(2),
@@ -352,6 +363,24 @@ def senscalc_sefd_i(path: str, lst_h: float, f_mhz: np.ndarray) -> np.ndarray:
         idx = np.argmin(np.abs((lst - lst_h + 12) % 24 - 12))
         sefd = h5['sefd'][idx, 0, 0]
     return np.interp(f_mhz, freqs, 0.5 * np.hypot(sefd[:, 0], sefd[:, 1]))
+
+
+def sys_req_lines(f_mhz: np.ndarray, kind: str, n_stations: int = 1) -> list:
+    """SKAO-SYS_REQ-2135 as plot_vs_freq lines, NaN outside 50-350 MHz.
+
+    kind 'aot' gives A/T_I; 'sefd' gives SEFD_I = sqrt(2) k / (A/T)_I. The requirement is for the 512-station
+    array; with n_stations=512 it is divided down to the equivalent per-station A/T (SEFD multiplied up).
+    """
+    lines = []
+    for aot, name, kw in (
+        (SYS_REQ_ZENITH, 'zenith', {'ls': '-.'}),
+        (SYS_REQ_AVERAGE, 'El>45°', {'ls': (0, (5, 1, 1, 1, 1, 1))}),
+    ):
+        a = np.interp(f_mhz, SYS_REQ_F_MHZ, aot, left=np.nan, right=np.nan) / n_stations
+        y = a if kind == 'aot' else TWO_K_JY / np.sqrt(2) / a
+        label = f'SYS_REQ_2135 {name}' + (f' (÷{n_stations})' if n_stations > 1 else '')
+        lines.append((f_mhz, y, label, {'color': 'k', 'lw': 1.5, **kw}))
+    return lines
 
 
 def coarse_reduce(values: np.ndarray, pix: np.ndarray, fn) -> np.ndarray:
@@ -697,6 +726,21 @@ def robust_top(arrays: list) -> float | None:
     return hi + (hi - lo)
 
 
+def legend_below(ax, max_cols: int = 5):
+    """Small multi-column legend under the axes, so it never covers the data. Save with bbox_inches='tight'."""
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(
+            handles,
+            labels,
+            loc='upper center',
+            bbox_to_anchor=(0.5, -0.14),
+            ncol=min(max_cols, len(handles)),
+            fontsize='x-small',
+            frameon=False,
+        )
+
+
 def plot_vs_freq(
     path: str,
     ylabel: str,
@@ -732,10 +776,10 @@ def plot_vs_freq(
     tops = [t for t in (ymax, robust_top(shown)) if t is not None]
     if tops and np.isfinite(top):
         plt.ylim(top=min(1.05 * top, *tops))
-    plt.legend()
+    legend_below(plt.gca(), max_cols=4)
     plt.xlabel('Frequency [MHz]')
     plt.ylabel(ylabel)
-    plt.savefig(path)
+    plt.savefig(path, bbox_inches='tight')
     plt.close()
 
 
@@ -773,7 +817,7 @@ def run_plot(
         plot_vs_freq(
             path(f'{s}_i_sefd_i_st_zoom'),
             f'{s} {UNITS["sefd_i_st"]}',
-            [(f, d['i']['sefd_i_st'], 'I', {})] + senscalc_line(),
+            [(f, d['i']['sefd_i_st'], 'I', {})] + senscalc_line() + sys_req_lines(f, 'sefd', ARRAYS['AA4']),
             frange=ZOOM_STATION_MHZ,
             ymin=zoom_ylim[0],
             ymax=zoom_ylim[1],
@@ -800,7 +844,7 @@ def run_plot(
             fig=fig.number,
             title='Predicted element SEFD$_I$ [Jy]',
         )
-        plt.savefig(path(f'{s}_maps_ch{chan}'))
+        plt.savefig(path(f'{s}_maps_ch{chan}'), bbox_inches='tight')
         plt.close(fig)
 
         for kind, label in (('el', 'Element'), ('st', f'Station {_ST}')):
@@ -828,7 +872,7 @@ def run_plot(
                 fig=fig.number,
                 title=f'{s} SEFD$_{st.upper()}$ / SEFD$_I$, {f[chan]:.1f} MHz',
             )
-        plt.savefig(path(f'{s}_sefd_ratio_ch{chan}'))
+        plt.savefig(path(f'{s}_sefd_ratio_ch{chan}'), bbox_inches='tight')
         plt.close(fig)
 
     def per_pol(col):
@@ -864,7 +908,7 @@ def run_plot(
                 {'color': color, 'ls': ':', 'lw': 1},
             ),
         ]
-    lines += senscalc_line()
+    lines += senscalc_line() + sys_req_lines(d0['f_mhz'], 'sefd', ARRAYS['AA4'])
     plot_vs_freq(path('all_sefd_i_st'), UNITS['sefd_i_st'], lines)
     plot_vs_freq(
         path('all_sefd_i_st_zoom'),
@@ -880,6 +924,7 @@ def run_plot(
         aot_lines.append(
             (d0['f_mhz'], TWO_K_JY / np.sqrt(2) / d0['senscalc_sefd_i'], sc_label, {'color': 'k', 'ls': '--'})
         )
+    aot_lines += sys_req_lines(d0['f_mhz'], 'aot', ARRAYS['AA4'])
     plot_vs_freq(path('all_a_over_t_i_st'), UNITS['a_over_t_i_st'], aot_lines)
     # Solid: I. Dashed: V. Dash-dot: Q. Thin solid: U. Dotted: I against the uncorrelated-noise prediction.
     lines = []
@@ -910,6 +955,9 @@ def run_plot(
     for name, n in ARRAYS.items():
         ax0.plot(f, aot * n, label=f'{name} ({n})')
         ax1.plot(f, sefd / n, label=f'{name} ({n})')
+    for ax, kind in ((ax0, 'aot'), (ax1, 'sefd')):
+        for fr, y, label, kw in sys_req_lines(f, kind):
+            ax.plot(fr, band_flag(fr, y), label=label, **kw)
     ax0.set_ylabel('Array A/T$_I$ [m$^2$ K$^{-1}$]')
     ax1.set_ylabel('Array SEFD$_I$ [Jy]')
     for ax, arrays in ((ax0, [aot * n for n in ARRAYS.values()]), (ax1, [sefd / n for n in ARRAYS.values()])):
@@ -917,11 +965,12 @@ def run_plot(
         if top is not None:
             ax.set_ylim(top=min(ax.get_ylim()[1], top))
         ax.set_xlabel('Frequency [MHz]')
-        ax.legend()
+        ax.set_xlim(f.min(), f.max())
+        legend_below(ax, max_cols=3)
     fig.suptitle(
         f'Mean of {len(dfs)} beamformed stations (zenith, LST {d0["obs_lst_h"]:.1f} h): {", ".join(dfs)}'
     )
-    fig.savefig(path('array_sensitivity'))
+    fig.savefig(path('array_sensitivity'), bbox_inches='tight')
     plt.close(fig)
     logger.info(f'[plot] wrote {len(glob.glob(os.path.join(pdir, "*.png")))} PNGs to {pdir}')
 
