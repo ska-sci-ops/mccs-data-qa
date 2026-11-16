@@ -14,6 +14,7 @@ import matplotlib as mpl
 import numpy as np
 from jinja2 import Environment, FileSystemLoader
 from loguru import logger
+from mccs_data_qa.reports.mccs_cal import MCCS_CAL, mccs_cal_problem, mccs_calibrate_channel
 
 from ska_ost_low_uv.io import read_uvx
 from ska_ost_low_uv.postx.aeps.eep_models import EEP_DIR_ENV, _eep_path
@@ -94,7 +95,9 @@ def input_parser(description: str, outdir: str, static_flags: bool = True) -> ar
     return p
 
 
-def base_parser(description: str, outdir: str, sigma_thr: float | None = None) -> argparse.ArgumentParser:
+def base_parser(
+    description: str, outdir: str, sigma_thr: float | None = None, mccs: bool = False
+) -> argparse.ArgumentParser:
     """Argument parser with the input, output and calibration options shared by the report scripts.
 
     Args:
@@ -102,6 +105,7 @@ def base_parser(description: str, outdir: str, sigma_thr: float | None = None) -
         outdir (str): Default output directory.
         sigma_thr (float): Default stefcal/suncal antenna outlier threshold. None leaves out the
             calibration options other than --sky-model, for scripts that read an existing cal.
+        mccs (bool): Also offer the MCCS solver's --cal-model choices, see `mccs_cal.MCCS_CAL`.
 
     Returns:
         parser (argparse.ArgumentParser): Parser with input, sky model and Sun calibration options.
@@ -120,10 +124,17 @@ def base_parser(description: str, outdir: str, sigma_thr: float | None = None) -
     )
     cal.add_argument(
         '--cal-model',
-        choices=CAL_MODELS,
+        choices=CAL_MODELS + (tuple(MCCS_CAL) if mccs else ()),
         default='sun+sky',
         help='sun+sky: the diffuse sky plus the Sun as an extended source when it is up (suncal); sky: the '
-        'diffuse sky only; sun: the Sun only, as a point source (no flux scale)',
+        'diffuse sky only; sun: the Sun only, as a point source (no flux scale)'
+        + (
+            '; mccs-gsm, mccs-sun, mccs-sunfast: the MCCS station calibration solver with the SFT GSM, SUN and '
+            'SUN_FAST settings (--leakage solve: polarised solve; --beam and --sky-model not used; GSM and SUN '
+            'need $EEP_PATH)'
+            if mccs
+            else ''
+        ),
     )
     cal.add_argument('--sky-model', default='gsm16', help='Diffuse sky model, also the flux reference')
     cal.add_argument(
@@ -246,6 +257,8 @@ def parse_flag_freqs(parser: argparse.ArgumentParser, s: str) -> list:
 
 def cal_args_problem(cal_model: str, leakage: str, beam: str) -> str:
     """Why a combination of calibration options can't be run, or '' if it can."""
+    if cal_model in MCCS_CAL:
+        return mccs_cal_problem(cal_model)
     if cal_model == 'sun+sky' and leakage == 'none':
         return 'sun+sky (suncal) solves full-Jones gains only: use --leakage solve, or another --cal-model.'
     if 'eep' in BEAMS.get(beam, {}):
@@ -265,8 +278,12 @@ def check_cal_args(parser: argparse.ArgumentParser, args: argparse.Namespace):
 def cal_variant(cal_model: str, leakage: str, beam: str, sky_model: str = 'gsm16', nside: int = 128) -> str:
     """Folder name of a stefcal run with these options, e.g. 'sun-gsm16_leakage_aep-harp'.
 
-    A non-default NSIDE is appended, e.g. '_nside64'.
+    A non-default NSIDE is appended, e.g. '_nside64'. An MCCS run has no beam or sky model, and only
+    mccs-gsm uses the NSIDE, e.g. 'mccs-gsm_noleakage_nside64'.
     """
+    if cal_model in MCCS_CAL:
+        nside_part = f'_nside{nside}' if cal_model == 'mccs-gsm' else ''
+        return f'{cal_model}_{"leakage" if leakage == "solve" else "noleakage"}{nside_part}'
     model = {'sun+sky': f'sun-{sky_model}', 'sky': sky_model, 'sun': 'sun'}[cal_model]
     return f'{model}_{"leakage" if leakage == "solve" else "noleakage"}_{beam}' + (
         f'_nside{nside}' if nside != 128 else ''
@@ -279,9 +296,9 @@ def station_cal_model(aa, cal_model: str) -> str:
     Raises:
         ValueError: For a Sun-only cal with the Sun below the horizon.
     """
-    if aa.coords.get_alt_az(aa.coords.get_sun()).alt.deg > 0:
-        return cal_model
-    if cal_model == 'sun':
+    if aa.coords.get_alt_az(aa.coords.get_sun()).alt.deg > 0 or cal_model == 'mccs-gsm':
+        return cal_model  # mccs-gsm drops the Sun itself when it is down
+    if cal_model in ('sun', 'mccs-sun', 'mccs-sunfast'):
         raise ValueError(f'{aa.name}: the Sun is below the horizon, so it cannot be calibrated on the Sun only')
     return 'sky'
 
@@ -313,8 +330,11 @@ def calibrate_channel(
     Returns:
         cal (UVXAntennaCal): The calibration.
         dg (float): Final StefCal convergence: dG for full-Jones gains, the larger of the two pols' z
-            for diagonal gains.
+            for diagonal gains. For an MCCS cal, the larger XX/YY residual rms relative to the model rms.
     """
+    if cal_model in MCCS_CAL:
+        cal, info = mccs_calibrate_channel(aa, cal_model, leakage, nside, antenna_flags)
+        return cal, float(np.max(info['rel_residual'][[0, 3]]))
     suncal_kwargs = suncal_kwargs or {}
     common = {'sigma_thr': sigma_thr, 'antenna_flags': antenna_flags, 'nside': nside, **BEAMS[beam]}
     if cal_model == 'sun+sky':

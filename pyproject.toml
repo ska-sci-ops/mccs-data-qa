@@ -25,7 +25,12 @@ notebook = ["ipywidgets"]
 # ska-ost-low-uv needs python 3.11+; the base install stays light for the MCCS host
 reports = [
     "ska-ost-low-uv[postx] @ git+https://gitlab.com/ska-telescope/ost/ska-ost-low-uv.git@main ; python_version >= '3.11'",
+    # MCCS station calibration solver (SFT GSM/SUN/SUN_FAST); its ska-sdp-* deps are on the SKAO index below
+    "ska-low-mccs-calibration @ git+https://gitlab.com/dancpr/ska-low-mccs-calibration.git@eep-spherical-harmonics ; python_version >= '3.11'",
+    # Fixed and faster solvers, incl. the jones_substitution polarised solve (--leakage solve)
+    "ska-sdp-func-python @ git+https://gitlab.com/dancpr/ska-sdp-func-python.git@aiv-000-solver-fix-and-optimise ; python_version >= '3.11'",
     "nicegui>=3 ; python_version >= '3.11'",
+    "fastapi ; python_version >= '3.11'",
     "jinja2>=3.1 ; python_version >= '3.11'",
     "hickle>=5 ; python_version >= '3.11'",
     "matplotlib ; python_version >= '3.11'",
@@ -36,6 +41,10 @@ mccs-spider = "mccs_data_qa.cli:main"
 mccs-analyse = "mccs_data_qa.analyse:cli"
 mccs-convert-set = "mccs_data_qa.convert_set:main"
 mccs-report-ui = "mccs_data_qa.reports.report_ui:main"
+
+[[tool.uv.index]]
+name = "skao"
+url = "https://artefact.skao.int/repository/pypi-internal/simple"
 
 [tool.setuptools]
 packages = ["mccs_data_qa", "mccs_data_qa.reports"]

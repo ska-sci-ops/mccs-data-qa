@@ -1,0 +1,10 @@
+db/*.csv
+db/*.log
+db/*.xlsx
+import_freq_sweep_uvx.ipynb
+.DS_Store
+mccs_data_qa/__pycache__/
+mccs_data_qa/reports/__pycache__/
+mccs_data_qa.egg-info/
+mccs_data_qa/__pycache__/__init__.cpython-311.pyc
+*.pyc

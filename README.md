@@ -54,3 +54,10 @@ terminal closes or the server is culled; `nohup mccs-report-ui --root sweeps > r
 keeps it past the terminal.
 
 Each script also runs on its own, e.g. `python -m mccs_data_qa.reports.run_stefcal --help`.
+
+The Calibration task can also run the MCCS station calibration solver with the SFT's GSM, SUN and
+SUN_FAST settings (`--cal-model mccs-gsm`, `mccs-sun`, `mccs-sunfast`; `--leakage solve` is the
+polarised solve). GSM and SUN need the MCCS EEPs, set as for the SFT notebooks with `$EEP_PATH`,
+`$EEP_FILE_NAME` and `$EEP_SUFFIX` (default `.npz`) before starting `mccs-report-ui`. The solver's
+ska-sdp-* dependencies come from the SKAO index, which `uv` picks up from `pyproject.toml`; with pip,
+add `--extra-index-url https://artefact.skao.int/repository/pypi-internal/simple`.

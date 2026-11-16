@@ -84,9 +84,21 @@ CAL_MODEL_ONLY = {
     'n_flux_iter': ('sun+sky',),
     'min_gsm_snr': ('sun+sky',),
     'min_sun_alt': ('sun+sky',),
+    # The MCCS solver has its own antenna flagging, beam (EEPs) and sky model; only mccs-gsm has an NSIDE
+    'sigma_thr': ('sun+sky', 'sky', 'sun'),
+    'beam': ('sun+sky', 'sky', 'sun'),
+    'nside': ('sun+sky', 'sky', 'sun', 'mccs-gsm'),
 }
 # Form select labels, by field and choice
-CHOICE_LABELS = {'cal_model': {'sun+sky': 'sun (extended) + sky', 'sun': 'sun (point source)'}}
+CHOICE_LABELS = {
+    'cal_model': {
+        'sun+sky': 'sun (extended) + sky',
+        'sun': 'sun (point source)',
+        'mccs-gsm': 'MCCS GSM (GSM + point Sun, EEPs)',
+        'mccs-sun': 'MCCS SUN (point Sun, EEPs)',
+        'mccs-sunfast': 'MCCS SUN_FAST (point Sun, no EEPs)',
+    }
+}
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 LOG_TAIL = 3000  # Lines of a finished run's log shown
 N_RECENT = 20  # Finished runs listed in the Queue tab
@@ -469,7 +481,7 @@ def unavailable(setdir: Path, name: str, values: dict | None = None) -> str:
     if values and 'cal_model' in values:
         from mccs_data_qa.reports.report import cal_args_problem
 
-        if values['cal_model'] == 'sun' and is_daytime(setdir) is False:
+        if values['cal_model'] in ('sun', 'mccs-sun', 'mccs-sunfast') and is_daytime(setdir) is False:
             return 'Night-time data: a Sun-only cal needs the Sun up.'
         return cal_args_problem(values['cal_model'], values['leakage'], values['beam'])
     return ''

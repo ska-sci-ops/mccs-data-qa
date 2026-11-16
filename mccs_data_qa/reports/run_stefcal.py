@@ -74,16 +74,16 @@ def _calibrate_sweep(
 
     See `report.calibrate_channel()` for the options; sun+sky (suncal) falls back to the diffuse sky
     on channels where the Sun is down. The final StefCal convergence of each channel is kept in `provenance['sweep']['dG']`,
-    and suncal results as per-channel arrays in `provenance['suncal']`. Channels with a bad timestamp
-    (see `report.bad_channel_times()`), where suncal found no flux scale, in `flag_freqs`, or with
-    RFI in the autocorrelation or gain spectra (see `flag_channels()`) are flagged.
+    and suncal or MCCS solver results as per-channel arrays in `provenance['suncal']` or `provenance['mccs']`.
+    Channels with a bad timestamp (see `report.bad_channel_times()`), where suncal found no flux scale, in
+    `flag_freqs`, or with RFI in the autocorrelation or gain spectra (see `flag_channels()`) are flagged.
 
     Args:
         fn (str): UVX station file.
         outdir (str): Output directory.
         sky_model (str): Diffuse sky model to calibrate against.
         sigma_thr (float): Antenna gain outlier threshold.
-        cal_model (str): 'sun+sky', 'sky' or 'sun'.
+        cal_model (str): 'sun+sky', 'sky', 'sun', or an MCCS solver model, see `mccs_cal.MCCS_CAL`.
         leakage (str): 'solve' for full-Jones gains, 'none' for diagonal gains.
         beam (str): Element pattern, a key of `report.BEAMS`.
         suncal_kwargs (dict): Extra suncal() options.
@@ -102,14 +102,14 @@ def _calibrate_sweep(
         logger.info(f'{aa.name}: using existing {cal_path}')
         return cal_path
 
-    if cal_model == 'sun':
+    if cal_model in ('sun', 'mccs-sun', 'mccs-sunfast'):
         # Raises if the Sun is down at either end of the sweep
         for i in (0, len(aa.f) - 1):
             with aa.select(f=i):
                 station_cal_model(aa, cal_model)
 
     def calibrate(aa, flags):
-        dgs, suns = [], []
+        dgs, suns, mccs = [], [], []
 
         def cal_channel(aa):
             cal, dg = calibrate_channel(
@@ -117,12 +117,17 @@ def _calibrate_sweep(
             )
             if 'suncal' in cal.provenance:
                 suns.append(cal.provenance['suncal'])
+            if 'mccs' in cal.provenance:
+                mccs.append(cal.provenance['mccs'])
             dgs.append(dg)
             return cal
 
         logger.info(f'{aa.name}: {cal_model} model, leakage {leakage}, {beam} on {len(aa.f)} channels')
         cal = iterate_channels_cal(aa, 'all', cal_channel)
         cal.provenance['sweep'] = {'dG': np.array(dgs)}
+        if mccs:
+            # MCCS solver info per channel, as (N_freq, ...) arrays
+            cal.provenance['mccs'] = {k: np.array([m[k] for m in mccs]) for k in mccs[0]}
         if suns:
             cal.provenance['suncal'] = merge_suncal_provenance(suns)
             # Channels where suncal kept the Sun-only gains (1 Jy Sun) are not in Jy, so are flagged
@@ -235,7 +240,8 @@ def run_stefcal(
         outdir (str): Parent folder of the run folders.
         sigma_thr (float): Antenna gain outlier threshold.
         sky_model (str): Diffuse sky model to calibrate against.
-        cal_model (str): 'sun+sky' (suncal when the Sun is up), 'sky' or 'sun'.
+        cal_model (str): 'sun+sky' (suncal when the Sun is up), 'sky', 'sun', or an MCCS model, see
+            `mccs_cal.MCCS_CAL`.
         leakage (str): 'solve' for full-Jones gains, 'none' for diagonal gains.
         beam (str): Element pattern, a key of `report.BEAMS`.
         suncal_kwargs (dict): Extra suncal() options, e.g. from `report.suncal_kwargs_from_args()`.
@@ -453,7 +459,7 @@ def write_summary(outdir: str | Path) -> Path | None:
 
 def build_parser() -> argparse.ArgumentParser:
     """Command-line argument parser."""
-    parser = base_parser(__doc__, outdir='calibration', sigma_thr=DEFAULT_SIGMA_THR)
+    parser = base_parser(__doc__, outdir='calibration', sigma_thr=DEFAULT_SIGMA_THR, mccs=True)
     parser.add_argument(
         '--n-jobs', type=int, default=4, help='Stations calibrated in parallel (~3 GB RAM each)'
     )
