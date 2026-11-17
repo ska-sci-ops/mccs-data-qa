@@ -58,6 +58,60 @@ SUMMARY_COLS = (
 )
 
 
+def pin_phase0(fit: dict, f: np.ndarray, min_coherence: float = DEFAULT_MIN_COHERENCE) -> dict:
+    """Refit a `fit_delays()` result with the phase offset pinned to 0, i.e. g(f) = exp(2πi f τ / c).
+
+    With φ0 = 0 the maximum-likelihood delay maximises Re P(τ) rather than |P(τ)|. Re P oscillates
+    with period ~c / f, so it is searched finely around the free fit's delay, then refined.
+
+    Args:
+        fit (dict): Output of `fit_delays()`, updated in place.
+        f (np.ndarray): Frequencies in Hz of the calibration it was fitted to.
+        min_coherence (float): Also flag antennas with pinned-fit coherence Re P / N_chan below this.
+
+    Returns:
+        fit (dict): The same dict, with 'delay', 'delay_ns', 'phase0' (zeros), 'coherence', 'resid',
+            'resid_rms', 'delay_err' and 'flags' from the pinned fit, and 'phase0_pinned' True.
+    """
+    shape = fit['delay'].shape
+    # Rebuild the (reference-antenna divided) unit phasors the free fit saw; NaN resid = not fitted
+    w = np.isfinite(fit['resid']).reshape(len(f), -1).astype('float64')
+    z = np.exp(1j * np.nan_to_num(_model_phase(f, fit) + fit['resid'])).reshape(len(f), -1) * w
+    tau0 = np.nan_to_num(fit['delay'].ravel())
+    bw = max(f.max() - f.min(), np.median(np.diff(f)) if len(f) > 1 else 1.0)
+    # ponytail: search only the free fit's main lobe (±c/BW); a pinned optimum on a sidelobe is missed
+    step = LIGHT_SPEED / (8 * f.max())
+    offsets = np.arange(-LIGHT_SPEED / bw, LIGHT_SPEED / bw + step, step)
+    for _ in range(4):  # Coarse pass, then 3 zooms
+        tau = tau0[None] + offsets[:, None]  # (K, M)
+        phasor = np.exp(-2j * np.pi * f[None, :, None] * tau[:, None] / LIGHT_SPEED)  # (K, N_f, M)
+        re_p = np.einsum('fm,kfm->km', z, phasor).real
+        tau0 = tau[np.argmax(re_p, axis=0), np.arange(tau.shape[1])]
+        offsets = np.linspace(-step, step, 17)
+        step = offsets[1] - offsets[0]
+
+    w_sum = w.sum(axis=0)
+    model = np.exp(2j * np.pi * np.outer(f, tau0) / LIGHT_SPEED)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        coherence = (z * np.conj(model)).sum(axis=0).real / w_sum
+        resid = np.where(w > 0, np.angle(z * np.conj(model)), np.nan)
+        resid_rms = np.sqrt(np.nansum(resid**2, axis=0) / w_sum)
+        # Cramer-Rao bound for the slope of a line through the origin
+        delay_err = LIGHT_SPEED * resid_rms / (2 * np.pi * np.sqrt((w * f[:, None] ** 2).sum(axis=0)))
+    fit |= {
+        'delay': tau0.reshape(shape),
+        'delay_ns': tau0.reshape(shape) / LIGHT_SPEED * 1e9,
+        'phase0': np.zeros(shape),
+        'coherence': coherence.reshape(shape),
+        'resid': resid.reshape(len(f), *shape),
+        'resid_rms': resid_rms.reshape(shape),
+        'delay_err': delay_err.reshape(shape),
+        'flags': fit['flags'] | ~(coherence.reshape(shape) >= min_coherence),
+        'phase0_pinned': True,
+    }
+    return fit
+
+
 def run_delay_fits(
     cal_files: list[str],
     outdir: str | Path,
@@ -65,6 +119,7 @@ def run_delay_fits(
     ref_ant: int | str | None = 'auto',
     min_coherence: float = DEFAULT_MIN_COHERENCE,
     sigma_thr: float = DEFAULT_SIGMA_THR,
+    zero_phase0: bool = False,
 ) -> dict:
     """Fit delays to each calibration file and write the model as `{outdir}/{name}_delay.cal`.
 
@@ -75,6 +130,7 @@ def run_delay_fits(
         ref_ant (int, str, or None): Reference antenna, passed to `fit_delays()`.
         min_coherence (float): Flag antennas with fit coherence below this.
         sigma_thr (float): Antenna and channel outlier threshold.
+        zero_phase0 (bool): Pin the phase offset to 0 at 0 Hz, see `pin_phase0()`. (default: False)
 
     Returns:
         results (dict): Per file stem, a dict with the input 'file', its 'cal' and its 'method', the
@@ -86,6 +142,8 @@ def run_delay_fits(
         cal = read_cal(fn)
         flags = _resolve_channel_flags(cal.gains.frequency.values * u.Hz, flag_freqs)
         fit = fit_delays(cal, flags, ref_ant=ref_ant, min_coherence=min_coherence, sigma_thr=sigma_thr)
+        if zero_phase0:
+            fit = pin_phase0(fit, cal.gains.frequency.values.astype('float64'), min_coherence)
         path = Path(outdir) / f'{name}_delay.cal'
         write_cal(delay_cal(cal, fit), str(path))
         results[name] = {'file': fn, 'cal': cal, 'method': cal.method, 'fit': fit, 'delay_cal': str(path)}
@@ -371,7 +429,12 @@ def delay_fit_report(
             'Antennas flagged X / Y',
             ' / '.join(str(sum(ft['flags'][:, p].sum() for ft in fits)) for p in range(2)),
         ),
-        ('Model', 'g(f) = exp(i (2π f τ / c + φ0))'),
+        (
+            'Model',
+            'g(f) = exp(i 2π f τ / c), φ0 pinned to 0'
+            if all(ft.get('phase0_pinned') for ft in fits)
+            else 'g(f) = exp(i (2π f τ / c + φ0))',
+        ),
     ]
     tabs = [
         (
@@ -591,6 +654,11 @@ def add_fit_args(p: argparse.ArgumentParser):
         '--sigma-thr', type=float, default=DEFAULT_SIGMA_THR, help='Antenna and channel outlier threshold'
     )
     g.add_argument(
+        '--zero-phase0',
+        action='store_true',
+        help='Pin the phase fits to have no offset (phase 0 at 0 MHz), fitting only a delay',
+    )
+    g.add_argument(
         '--flag-freqs',
         type=str,
         default='',
@@ -629,7 +697,13 @@ def main():
         rundir = Path(args.outdir) / run
         rundir.mkdir(parents=True, exist_ok=True)
         results = run_delay_fits(
-            files, rundir, flag_freqs, parse_ref_ant(args.ref_ant), args.min_coherence, args.sigma_thr
+            files,
+            rundir,
+            flag_freqs,
+            parse_ref_ant(args.ref_ant),
+            args.min_coherence,
+            args.sigma_thr,
+            args.zero_phase0,
         )
         index_fn = delay_fit_report(
             results, rundir, positions=positions, title=f'Delay Fit Report: {run}', cli_args=vars(args)

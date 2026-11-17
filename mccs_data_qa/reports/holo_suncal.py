@@ -146,6 +146,7 @@ def holo_suncal(
     ref_ant: int | str | None = 'auto',
     min_coherence: float = 0.5,
     sigma_thr: float = 5,
+    zero_phase0: bool = False,
     cli_args: dict | None = None,
 ) -> Path:
     """Holography cal of each station sweep, delay fits, and the report webpage, in `outdir/sun-holography/`.
@@ -163,6 +164,7 @@ def holo_suncal(
         ref_ant (int, str, or None): Reference antenna for the delay fits.
         min_coherence (float): Flag antennas with delay fit coherence below this.
         sigma_thr (float): Delay fit antenna and channel outlier threshold.
+        zero_phase0 (bool): Pin the delay fit phase offsets to 0 at 0 Hz.
         cli_args (dict): Command-line arguments for the Settings tab. (default: None)
 
     Returns:
@@ -176,7 +178,7 @@ def holo_suncal(
 
     tasks = [task(_holo_sweep)(fn, str(rundir), reuse_cal, ignore_static_flags, flag_freqs) for fn in files]
     cal_paths = run_in_parallel(tasks, n_workers=n_jobs, verbose=True)
-    results = run_delay_fits(cal_paths, rundir / 'delay', flag_freqs, ref_ant, min_coherence, sigma_thr)
+    results = run_delay_fits(cal_paths, rundir / 'delay', flag_freqs, ref_ant, min_coherence, sigma_thr, zero_phase0)
 
     apertures, farfields = {}, {}
     for fn, res in zip(files, results.values(), strict=True):
@@ -235,6 +237,7 @@ def main():
         ref_ant=parse_ref_ant(args.ref_ant),
         min_coherence=args.min_coherence,
         sigma_thr=args.sigma_thr,
+        zero_phase0=args.zero_phase0,
         cli_args=vars(args),
     )
     print(f'Wrote {index_fn}')
