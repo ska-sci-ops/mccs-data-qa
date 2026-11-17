@@ -1711,7 +1711,9 @@ SET_FIELDS = {
 }
 DETAIL_COLS = ('Station ID', 'Observation ID', 'UTC Start', 'n_files', 'Duration (s)', 'Status', 'error')
 # Set folder options of mccs-convert-set, filled in by the page
-CONVERT_SET_ARGS = ('set_id', 'xlsx', 'daq_dir', 'out_dir', 'list')
+# quantise has an optional value (--lossy [STEP]), so the page shows it as a switch and a step instead
+CONVERT_SET_ARGS = ('set_id', 'xlsx', 'daq_dir', 'out_dir', 'list', 'quantise')
+LOSSY_STEP = 0.5  # mccs-convert-set's default step
 CONVERT, SPIDER = 'mccs_data_qa.convert_set', 'mccs_data_qa.cli'
 SETS_CSS = """<style>
 .sets-grid { --ag-font-family: 'Noto Sans', Verdana, sans-serif; --ag-font-size: 13px;
@@ -1886,6 +1888,12 @@ def set_row_state(row: dict, existing: set[str]) -> dict:
     return st
 
 
+def convert_argv(fields: list[Field], values: dict) -> list[str]:
+    """mccs-convert-set options from the Convert options form: lossless unless the lossy switch is on."""
+    step = values.get('step') or LOSSY_STEP
+    return build_argv(fields, values) + ([f'--lossy={float(step)!r}'] if values.get('lossy') else [])
+
+
 def tool_label(r: Run) -> str:
     """'Convert set614_2025-03-01' or 'Update database'."""
     return 'Update database' if r.script == SPIDER else f'Convert {r.dir.parent.parent.name}'
@@ -1911,7 +1919,7 @@ async def sets_page():
 
         PARSERS[CONVERT] = build_parser()
     fields = [f for f in form_fields(PARSERS[CONVERT]) if f.dest not in CONVERT_SET_ARGS]
-    values = FORM_VALUES.setdefault(CONVERT, default_values(fields))
+    values = FORM_VALUES.setdefault(CONVERT, default_values(fields) | {'lossy': False, 'step': LOSSY_STEP})
     spider = FORM_VALUES.setdefault(SPIDER, {'all': False, 'upload': True})
 
     def existing() -> set[str]:
@@ -1975,7 +1983,7 @@ async def sets_page():
             f'--xlsx={xlsx}',
             f'--daq-dir={STATE["daq_dir"]}',
             f'--out-dir={root}',
-            *build_argv(fields, values),
+            *convert_argv(fields, values),
         ]
         r = enqueue_tool(conv, CONVERT, argv)
         show_job(TOOL_RUNS.get(conv) or r)
@@ -2138,6 +2146,14 @@ async def sets_page():
                     ui.label("Used by every set's Convert button.").classes('text-xs text-grey-7')
                     for f in fields:
                         _field_widget(f, values)
+                    ui.switch('--lossy').bind_value(values, 'lossy')
+                    with ui.column().classes('w-full gap-0') as lossy:
+                        ui.number('STEP', min=0.01, step=0.1).bind_value(values, 'step').classes('w-full')
+                    lossy.bind_visibility_from(values, 'lossy')
+                    ui.label(
+                        'Off: lossless (zstd). On: store crosses as int16, quantised to STEP x thermal noise '
+                        f'(default {LOSSY_STEP}, ~4x smaller).'
+                    ).classes('text-xs text-grey-7')
             with ui.button('Update database', icon='cloud_sync').props('unelevated dense no-caps'):
                 with ui.menu().classes('p-3 w-96') as db_menu, ui.column().classes('w-full gap-1'):
                     ui.label('Update database').classes('eyebrow')

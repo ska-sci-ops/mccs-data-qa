@@ -5,7 +5,7 @@ import pandas as pd
 from mccs_data_qa.analyse import add_derived, write_calibration_report
 from mccs_data_qa.convert_set import build_parser, set_folder
 from mccs_data_qa.reports.argparse_form import form_fields
-from mccs_data_qa.reports.report_ui import CONVERT_SET_ARGS, SET_YAML, load_sets, set_columns
+from mccs_data_qa.reports.report_ui import CONVERT_SET_ARGS, SET_YAML, convert_argv, load_sets, set_columns
 
 
 def _sweeps() -> pd.DataFrame:
@@ -42,6 +42,11 @@ def test_sets_page_reads_analyse_workbook(tmp_path):
     assert set_row_state(row, {'set1_2026-07-29'})['qa'] == 'unreviewed'
 
 
-def test_convert_form_leaves_set_args_to_the_page():
-    dests = {f.dest for f in form_fields(build_parser()) if f.dest not in CONVERT_SET_ARGS}
-    assert dests == {'n_expected', 'include_failed', 'quantise'}
+def test_convert_form_is_lossless_unless_switched():
+    fields = [f for f in form_fields(build_parser()) if f.dest not in CONVERT_SET_ARGS]
+    assert {f.dest for f in fields} == {'n_expected', 'include_failed'}
+    values = {'n_expected': 385, 'include_failed': False, 'lossy': False, 'step': 0}
+    assert convert_argv(fields, values) == []  # A stray step never turns on lossy
+    assert convert_argv(fields, values | {'lossy': True}) == ['--lossy=0.5']
+    argv = convert_argv(fields, values | {'lossy': True, 'step': 0.25})
+    assert build_parser().parse_args(['1', *argv]).quantise == 0.25
