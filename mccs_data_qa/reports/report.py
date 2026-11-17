@@ -14,7 +14,7 @@ import matplotlib as mpl
 import numpy as np
 from jinja2 import Environment, FileSystemLoader
 from loguru import logger
-from mccs_data_qa.reports.mccs_cal import MCCS_CAL, mccs_cal_problem, mccs_calibrate_channel
+from mccs_data_qa.reports.mccs_cal import MCCS_CAL, MCCS_EEPS, mccs_cal_problem, mccs_calibrate_channel
 
 from ska_ost_low_uv.io import read_uvx
 from ska_ost_low_uv.postx.aeps.eep_models import EEP_DIR_ENV, _eep_path
@@ -86,6 +86,7 @@ def input_parser(description: str, outdir: str, static_flags: bool = True) -> ar
     io.add_argument('--datadir', required=True, help='Folder of UVX station files')
     io.add_argument('--eb', default='eb-t0001-20260505-0000*', help='Glob pattern for station files')
     io.add_argument('--outdir', default=outdir, help='Output directory for the report')
+    io.add_argument('--stations', default='all', help="Stations to use: 'all', or names, e.g. 's8-1, s8-2'")
     if static_flags:
         p.add_argument(
             '--ignore-static-flags',
@@ -131,7 +132,7 @@ def base_parser(
         + (
             '; mccs-gsm, mccs-sun, mccs-sunfast: the MCCS station calibration solver with the SFT GSM, SUN and '
             'SUN_FAST settings (--leakage solve: polarised solve; --beam and --sky-model not used; GSM and SUN '
-            'need $EEP_PATH)'
+            'need EEPs, see --mccs-eep)'
             if mccs
             else ''
         ),
@@ -150,6 +151,15 @@ def base_parser(
         help='Element pattern for the sky model and its EM model: aep: average, packaged; eep: per-antenna '
         f'embedded, from ${EEP_DIR_ENV} ({os.environ.get(EEP_DIR_ENV, "unset")})',
     )
+    if mccs:
+        cal.add_argument(
+            '--mccs-eep',
+            choices=list(MCCS_EEPS),
+            default='regular',
+            help='EEPs for mccs-gsm and mccs-sun: regular: the solver\'s npz files from $EEP_PATH '
+            f'({os.environ.get("EEP_PATH", "unset")}); compressed-<name>: spherical-harmonic <name>.h5 from '
+            f'${EEP_DIR_ENV} ({os.environ.get(EEP_DIR_ENV, "unset")})',
+        )
     add_suncal_args(cal)
     return p
 
@@ -180,7 +190,13 @@ def station_key(name: str) -> list:
     return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', name)]
 
 
-def drop_repeated_stations(files: list[str], stations=None) -> list[str]:
+def parse_stations(s: str) -> set[str] | None:
+    """Station names from --stations, e.g. 's8-1, s8-2' or 's8-1 s8-2'; None for 'all' or empty."""
+    names = set(re.split(r'[,\s]+', s.strip())) - {''}
+    return None if not names or names == {'all'} else names
+
+
+def drop_repeated_stations(files: list[str], stations=None, select=None) -> list[str]:
     """Keep one file per station, in station order (s8-1, ..., s10-6), warning about repeats.
 
     A repeated station keeps the file whose start time is closest to the mean start time of the
@@ -189,14 +205,20 @@ def drop_repeated_stations(files: list[str], stations=None) -> list[str]:
     Args:
         files (list): UVX files.
         stations (Iterable): Allowed station names, e.g. `AA1_GRID`. None allows any.
+        select (set): Stations to keep, see `parse_stations()`. None keeps all.
 
     Raises:
-        ValueError: If a station appears in more than two files, or is not in `stations`.
+        ValueError: If a station appears in more than two files, or is not in `stations`, or a selected
+            station is in no file.
     """
     by_name = {}
     for fn in files:
         uvx = read_uvx(fn)
         by_name.setdefault(uvx.name, []).append((fn, uvx.timestamps[0].unix))
+    if select is not None:
+        if missing := sorted(select - set(by_name), key=station_key):
+            raise ValueError(f'Stations not in the files: {missing}; found {sorted(by_name, key=station_key)}')
+        by_name = {n: v for n, v in by_name.items() if n in select}
     if stations is not None and (unknown := sorted(set(by_name) - set(stations), key=station_key)):
         raise ValueError(f'Stations not in the AA1 layout: {unknown}')
     too_many = {n: [os.path.basename(fn) for fn, _ in v] for n, v in by_name.items() if len(v) > 2}
@@ -230,7 +252,7 @@ def find_station_files(parser: argparse.ArgumentParser, args: argparse.Namespace
     if not files:
         parser.error(f'No files match {os.path.join(args.datadir, args.eb)}.uvx')
     try:
-        return drop_repeated_stations(files, stations)
+        return drop_repeated_stations(files, stations, parse_stations(args.stations))
     except ValueError as err:
         parser.error(str(err))
 
@@ -255,10 +277,10 @@ def parse_flag_freqs(parser: argparse.ArgumentParser, s: str) -> list:
         parser.error(f'Cannot parse --flag-freqs {s!r}, expected increasing ranges, e.g. 87.5-108,137-138')
 
 
-def cal_args_problem(cal_model: str, leakage: str, beam: str) -> str:
+def cal_args_problem(cal_model: str, leakage: str, beam: str, mccs_eep: str = 'regular') -> str:
     """Why a combination of calibration options can't be run, or '' if it can."""
     if cal_model in MCCS_CAL:
-        return mccs_cal_problem(cal_model)
+        return mccs_cal_problem(cal_model, mccs_eep)
     if cal_model == 'sun+sky' and leakage == 'none':
         return 'sun+sky (suncal) solves full-Jones gains only: use --leakage solve, or another --cal-model.'
     if 'eep' in BEAMS.get(beam, {}):
@@ -271,19 +293,24 @@ def cal_args_problem(cal_model: str, leakage: str, beam: str) -> str:
 
 def check_cal_args(parser: argparse.ArgumentParser, args: argparse.Namespace):
     """Exit with a parser error if the calibration options can't be run together."""
-    if problem := cal_args_problem(args.cal_model, args.leakage, args.beam):
+    if problem := cal_args_problem(args.cal_model, args.leakage, args.beam, getattr(args, 'mccs_eep', 'regular')):
         parser.error(problem)
 
 
-def cal_variant(cal_model: str, leakage: str, beam: str, sky_model: str = 'gsm16', nside: int = 128) -> str:
+def cal_variant(
+    cal_model: str, leakage: str, beam: str, sky_model: str = 'gsm16', nside: int = 128, mccs_eep: str = 'regular'
+) -> str:
     """Folder name of a stefcal run with these options, e.g. 'sun-gsm16_leakage_aep-harp'.
 
     A non-default NSIDE is appended, e.g. '_nside64'. An MCCS run has no beam or sky model, and only
-    mccs-gsm uses the NSIDE, e.g. 'mccs-gsm_noleakage_nside64'.
+    mccs-gsm uses the NSIDE, e.g. 'mccs-gsm_noleakage_nside64'. Non-regular EEPs of an MCCS run with EEPs are
+    appended, e.g. 'mccs-gsm_noleakage_compressed-harp_nside64'.
     """
     if cal_model in MCCS_CAL:
+        uses_eeps = not MCCS_CAL[cal_model].get('ignore_eeps')
+        eep_part = f'_{mccs_eep}' if uses_eeps and mccs_eep != 'regular' else ''  # Regular keeps the old names
         nside_part = f'_nside{nside}' if cal_model == 'mccs-gsm' else ''
-        return f'{cal_model}_{"leakage" if leakage == "solve" else "noleakage"}{nside_part}'
+        return f'{cal_model}_{"leakage" if leakage == "solve" else "noleakage"}{eep_part}{nside_part}'
     model = {'sun+sky': f'sun-{sky_model}', 'sky': sky_model, 'sun': 'sun'}[cal_model]
     return f'{model}_{"leakage" if leakage == "solve" else "noleakage"}_{beam}' + (
         f'_nside{nside}' if nside != 128 else ''
@@ -313,6 +340,7 @@ def calibrate_channel(
     antenna_flags=None,
     suncal_kwargs: dict | None = None,
     nside: int = 128,
+    mccs_eep: str = 'regular',
 ):
     """Calibrate the selected channel of a station.
 
@@ -326,6 +354,7 @@ def calibrate_channel(
         antenna_flags (np.ndarray): Antenna flags.
         suncal_kwargs (dict): suncal() options.
         nside (int): Healpix NSIDE of the sky model.
+        mccs_eep (str): EEPs of an MCCS model, a key of `mccs_cal.MCCS_EEPS`.
 
     Returns:
         cal (UVXAntennaCal): The calibration.
@@ -333,7 +362,7 @@ def calibrate_channel(
             for diagonal gains. For an MCCS cal, the larger XX/YY residual rms relative to the model rms.
     """
     if cal_model in MCCS_CAL:
-        cal, info = mccs_calibrate_channel(aa, cal_model, leakage, nside, antenna_flags)
+        cal, info = mccs_calibrate_channel(aa, cal_model, leakage, nside, antenna_flags, mccs_eep)
         return cal, float(np.max(info['rel_residual'][[0, 3]]))
     suncal_kwargs = suncal_kwargs or {}
     common = {'sigma_thr': sigma_thr, 'antenna_flags': antenna_flags, 'nside': nside, **BEAMS[beam]}

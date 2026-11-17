@@ -58,6 +58,10 @@ Each script also runs on its own, e.g. `python -m mccs_data_qa.reports.run_stefc
 The Calibration task can also run the MCCS station calibration solver with the SFT's GSM, SUN and
 SUN_FAST settings (`--cal-model mccs-gsm`, `mccs-sun`, `mccs-sunfast`; `--leakage solve` is the
 polarised solve). GSM and SUN need the MCCS EEPs, set as for the SFT notebooks with `$EEP_PATH`,
-`$EEP_FILE_NAME` and `$EEP_SUFFIX` (default `.npz`) before starting `mccs-report-ui`. The solver's
+`$EEP_FILE_NAME` and `$EEP_SUFFIX` (default `.npz`) before starting `mccs-report-ui`. To use the
+compressed (spherical-harmonic `.h5`) EEPs instead, set `$POSTX_EEP_DIR` to their folder, e.g.
+`export POSTX_EEP_DIR=/path/to/shc-eeps` holding `ska_low_harp.h5` and `ska_low_feko.h5`, and pick
+`--mccs-eep compressed-harp` or `compressed-feko` (the "mccs-eep" select in the UI; `regular` is the npz
+EEPs). `$POSTX_EEP_DIR` also adds the `eep-harp` and `eep-feko` `--beam` choices. The solver's
 ska-sdp-* dependencies come from the SKAO index, which `uv` picks up from `pyproject.toml`; with pip,
 add `--extra-index-url https://artefact.skao.int/repository/pypi-internal/simple`.

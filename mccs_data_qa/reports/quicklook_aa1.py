@@ -119,6 +119,19 @@ def _plot_corr_matrices(aas: dict, bad_stations: list[str], outdir: Path) -> str
     return fn
 
 
+def _plot_uvdist(aas: dict, bad_stations: list[str], outdir: Path) -> list[str]:
+    """One 2x2 (per-pol) calibrated amplitude vs UV distance figure per station."""
+    fns = []
+    for name, aa in aas.items():
+        title = name if name not in bad_stations else f'{name} (cal fail)'
+        aa.plotting.plot_uvdist_amp_4pol(title=title)
+        fn = f'uvdist_{name}.png'
+        plt.savefig(outdir / fn)
+        plt.close()
+        fns.append(fn)
+    return fns
+
+
 def _plot_allsky_images(aas: dict, bad_stations: list[str], outdir: Path, vis: str = 'cal') -> tuple[dict, str]:
     """Grid of per-station all-sky images from the 'cal' or uncalibrated 'data' visibilities."""
     plt.figure(figsize=(AA1_GRID_COLS * 3, AA1_GRID_ROWS * 3))
@@ -271,6 +284,7 @@ def quicklook_aa1(
 
     fn_flags = _plot_antenna_flags(aas, bad_stations, outdir_path)
     fn_corr = _plot_corr_matrices(aas, bad_stations, outdir_path)
+    fn_uvdist = _plot_uvdist(aas, bad_stations, outdir_path)
     imgs, fn_allsky = _plot_allsky_images(aas, bad_stations, outdir_path)
     _, fn_allsky_uncal = _plot_allsky_images(aas, bad_stations, outdir_path, vis='data')
 
@@ -344,6 +358,11 @@ def quicklook_aa1(
         ('flags', 'Flagged antennas', fig(fn_flags, 'Flagged antennas')),
         ('corr', 'Correlation matrix', fig(fn_corr, 'Correlation matrix')),
         (
+            'uvdist',
+            'UV distance',
+            figs([fn.removesuffix('.png') for fn in fn_uvdist], prefix='', captions=list(aas)),
+        ),
+        (
             'allsky',
             'All-sky images',
             fig(fn_allsky, 'Calibrated') + fig(fn_allsky_uncal, 'Before calibration'),
@@ -357,7 +376,7 @@ def quicklook_aa1(
         ),
     ]
     if good_imgs:
-        tabs[3:3] = [
+        tabs[-2:-2] = [  # Before Metadata and Settings
             ('fracdiff', 'Fractional differences', fig(fn_frac_x, 'X-pol') + fig(fn_frac_y, 'Y-pol')),
             (
                 'combined',

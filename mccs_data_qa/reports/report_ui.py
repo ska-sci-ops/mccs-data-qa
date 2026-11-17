@@ -88,6 +88,7 @@ CAL_MODEL_ONLY = {
     'sigma_thr': ('sun+sky', 'sky', 'sun'),
     'beam': ('sun+sky', 'sky', 'sun'),
     'nside': ('sun+sky', 'sky', 'sun', 'mccs-gsm'),
+    'mccs_eep': ('mccs-gsm', 'mccs-sun'),  # mccs-sunfast has no EEPs
 }
 # Form select labels, by field and choice
 CHOICE_LABELS = {
@@ -97,7 +98,8 @@ CHOICE_LABELS = {
         'mccs-gsm': 'MCCS GSM (GSM + point Sun, EEPs)',
         'mccs-sun': 'MCCS SUN (point Sun, EEPs)',
         'mccs-sunfast': 'MCCS SUN_FAST (point Sun, no EEPs)',
-    }
+    },
+    'mccs_eep': {'regular': 'regular (npz, $EEP_PATH)'},
 }
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 LOG_TAIL = 3000  # Lines of a finished run's log shown
@@ -278,7 +280,14 @@ def run_dir(setdir: Path, name: str, values: dict | None = None) -> Path:
     if name == 'holo_suncal':
         return report_dir(setdir, name) / HOLO_RUN
     if name == 'calibration' and values:
-        run = cal_variant(values['cal_model'], values['leakage'], values['beam'], values['sky_model'], values['nside'])
+        run = cal_variant(
+            values['cal_model'],
+            values['leakage'],
+            values['beam'],
+            values['sky_model'],
+            values['nside'],
+            values.get('mccs_eep', 'regular'),
+        )
         return report_dir(setdir, name) / run
     return report_dir(setdir, name)
 
@@ -483,7 +492,9 @@ def unavailable(setdir: Path, name: str, values: dict | None = None) -> str:
 
         if values['cal_model'] in ('sun', 'mccs-sun', 'mccs-sunfast') and is_daytime(setdir) is False:
             return 'Night-time data: a Sun-only cal needs the Sun up.'
-        return cal_args_problem(values['cal_model'], values['leakage'], values['beam'])
+        return cal_args_problem(
+            values['cal_model'], values['leakage'], values['beam'], values.get('mccs_eep', 'regular')
+        )
     return ''
 
 
@@ -717,6 +728,27 @@ def delete_cal_run(d: Path):
     if fits.is_dir():
         shutil.rmtree(fits)
         delay_fit_summary(report_dir(s, 'delay_fit'))
+
+
+def import_cal_run(src: Path, dest: Path):
+    """Copy a calibration run of another set into a set, and rebuild the set's comparison page.
+
+    The copy keeps the run's report, log and QA mark; its run.json still names the source set's files.
+    """
+    from mccs_data_qa.reports.run_stefcal import write_summary
+
+    shutil.copytree(src, dest)
+    write_summary(dest.parent)
+
+
+def importable_sets(setdir: Path) -> dict[str, list[str]]:
+    """Sets next to a set with calibration runs, {set folder: [run names]}, in natural order."""
+    from mccs_data_qa.reports.report import station_key
+
+    sets = sorted(
+        (p for p in setdir.parent.iterdir() if (p / SET_YAML).exists()), key=lambda p: station_key(p.name)
+    )
+    return {str(p): names for p in sets if p != setdir and (names := [d.name for d in cal_runs(p)])}
 
 
 def cal_coming(setdir: Path) -> bool:
@@ -1029,6 +1061,9 @@ def index():
                             .tooltip('Compare the calibration runs')
                         )
                         ui.space()
+                        ui.button('Import', icon='download', on_click=lambda: import_dialog(s)).props(
+                            'flat dense no-caps'
+                        ).tooltip('Copy a calibration run from another set')
                         ui.button('Add cal', icon='add', on_click=dlg.open).props('unelevated dense no-caps')
                 else:
                     reason = ui.label().classes('text-xs text-orange-9')
@@ -1128,6 +1163,57 @@ def index():
     async def add_cal(dlg, name: str, script: str):
         dlg.close()
         await on_run(name, script)
+
+    async def import_dialog(s: Path):
+        """Ask for a calibration run of another set, then copy it into this set."""
+        sets = await run.io_bound(importable_sets, s)
+        if not sets:
+            ui.notify(f'No other set in {s.parent} has calibration runs')
+            return
+        with ui.dialog() as dialog, ui.card().classes('w-[34rem] max-w-full'):
+            ui.label('Import a calibration run').classes('text-h6')
+            ui.label(f'Copies the run folder into {s.name}/reports/calibration/.').classes('text-xs text-grey-7')
+            src_set = ui.select({k: Path(k).name for k in sets}, label='From set', value=next(iter(sets)))
+            src_run = ui.select([], label='Calibration run')
+            name = ui.input('Name in this set')
+            for w in (src_set, src_run, name):
+                w.classes('w-full')
+
+            def on_set():
+                src_run.set_options(sets[src_set.value], value=sets[src_set.value][0])
+
+            def on_pick():
+                name.set_value(f'{src_run.value}_from_{Path(src_set.value).name}' if src_run.value else '')
+
+            src_set.on_value_change(on_set)
+            src_run.on_value_change(on_pick)
+            on_set()
+            with ui.row().classes('w-full justify-end'):
+                ui.button('Cancel', on_click=lambda: dialog.submit(None)).props('flat no-caps')
+                ui.button(
+                    'Import',
+                    icon='download',
+                    on_click=lambda: dialog.submit(
+                        (report_dir(Path(src_set.value), 'calibration') / src_run.value, name.value.strip())
+                    ),
+                ).props('unelevated no-caps')
+        picked = await dialog
+        dialog.delete()
+        if not picked:
+            return
+        src, new = picked
+        dest = report_dir(s, 'calibration') / new
+        # One folder name, inside this set's calibration folder
+        if not new or Path(new).name != new or new.startswith('.'):
+            ui.notify(f'Not imported: {new!r} is not a folder name')
+        elif dest.exists():
+            ui.notify(f'Not imported: {run_label(dest)} already exists')
+        elif why := cal_in_use(src):
+            ui.notify(f'Not imported: {why}')
+        else:
+            await run.io_bound(import_cal_run, src, dest)
+            ui.notify(f'Imported {run_label(src)} as {run_label(dest)}')
+            folder.refresh()
 
     async def confirm_delete(d: Path):
         """Ask, then delete a calibration run and its delay fits."""

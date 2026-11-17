@@ -92,7 +92,9 @@ def test_real_parsers_roundtrip(name):
             values[f.dest] = not f.default
             want = not f.default
         elif f.kind == 'select':
-            want = next(c for c in f.choices if c != f.default)
+            want = next((c for c in f.choices if c != f.default), None)
+            if want is None:  # One choice, e.g. --mccs-eep without $POSTX_EEP_DIR
+                continue
             values[f.dest] = want
         elif f.kind == 'multiselect':
             want = f.choices[:1]
@@ -462,3 +464,34 @@ def test_report_ui_cal_ready(tmp_path, monkeypatch):
         report_ui.Job(tmp_path, 'delay_fit', [], 0, report_ui.report_dir(tmp_path, 'delay_fit'), [cal])
     ]
     assert not report_ui.cal_ready(sens)
+
+
+def test_parse_stations():
+    """--stations takes 'all', or station names separated by commas and/or spaces."""
+    from mccs_data_qa.reports.report import parse_stations
+
+    assert parse_stations('all') is None and parse_stations(' ') is None
+    assert parse_stations('s8-1, s8-2') == {'s8-1', 's8-2'}
+    assert parse_stations('s8-1 s9-2,s10-1') == {'s8-1', 's9-2', 's10-1'}
+
+
+def test_report_ui_import_cal(tmp_path, monkeypatch):
+    """Sets next to a set offer their calibration runs; an import copies the run and rebuilds the page."""
+    pytest.importorskip('nicegui')
+    from mccs_data_qa.reports import report_ui
+
+    a, b, c = (tmp_path / n for n in ('set1', 'set2', 'set10'))
+    for s in (a, b, c):
+        s.mkdir()
+        (s / report_ui.SET_YAML).write_text('set_id: 1\n')
+    src = report_ui.report_dir(b, 'calibration') / 'run1'
+    src.mkdir(parents=True)
+    (src / 's8-1.cal').write_text('cal')
+    assert report_ui.importable_sets(a) == {str(b): ['run1']}
+
+    dest = report_ui.report_dir(a, 'calibration') / 'run1_from_set2'
+    report_ui.import_cal_run(src, dest)
+    assert (dest / 's8-1.cal').read_text() == 'cal'
+    assert report_ui.cal_runs(a) == [dest]
+    assert 'url=run1_from_set2/index.html' in (dest.parent / 'index.html').read_text()
+    assert report_ui.importable_sets(b) == {str(a): ['run1_from_set2']}

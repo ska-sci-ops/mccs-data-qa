@@ -66,6 +66,7 @@ def _calibrate_sweep(
     beam: str = 'aep-harp',
     suncal_kwargs: dict | None = None,
     nside: int = 128,
+    mccs_eep: str = 'regular',
     reuse: bool = False,
     ignore_static_flags: bool = False,
     flag_freqs: list | None = None,
@@ -88,6 +89,7 @@ def _calibrate_sweep(
         beam (str): Element pattern, a key of `report.BEAMS`.
         suncal_kwargs (dict): Extra suncal() options.
         nside (int): Healpix NSIDE of the sky model.
+        mccs_eep (str): EEPs of an MCCS model, a key of `mccs_cal.MCCS_EEPS`.
         reuse (bool): Keep an existing cal file instead of recalibrating.
         ignore_static_flags (bool): Ignore the static antenna flags stored in the UVX file.
         flag_freqs (list): (start, stop) Quantity frequency ranges to flag, e.g. known RFI bands.
@@ -113,7 +115,7 @@ def _calibrate_sweep(
 
         def cal_channel(aa):
             cal, dg = calibrate_channel(
-                aa, cal_model, leakage, beam, sky_model, sigma_thr, flags, suncal_kwargs, nside
+                aa, cal_model, leakage, beam, sky_model, sigma_thr, flags, suncal_kwargs, nside, mccs_eep
             )
             if 'suncal' in cal.provenance:
                 suns.append(cal.provenance['suncal'])
@@ -224,6 +226,7 @@ def run_stefcal(
     beam: str = 'aep-harp',
     suncal_kwargs: dict | None = None,
     nside: int = 128,
+    mccs_eep: str = 'regular',
     n_jobs: int = 4,
     reuse_cal: bool = False,
     ignore_static_flags: bool = False,
@@ -245,6 +248,7 @@ def run_stefcal(
         leakage (str): 'solve' for full-Jones gains, 'none' for diagonal gains.
         beam (str): Element pattern, a key of `report.BEAMS`.
         suncal_kwargs (dict): Extra suncal() options, e.g. from `report.suncal_kwargs_from_args()`.
+        mccs_eep (str): EEPs of an MCCS model, a key of `mccs_cal.MCCS_EEPS`.
         n_jobs (int): Stations calibrated in parallel.
         reuse_cal (bool): Keep existing `{station}.cal` files in the run folder instead of recalibrating.
         ignore_static_flags (bool): Ignore the static antenna flags stored in the UVX files.
@@ -254,7 +258,7 @@ def run_stefcal(
     Returns:
         index_fn (Path): The run's index.html.
     """
-    outdir_path = Path(outdir) / cal_variant(cal_model, leakage, beam, sky_model, nside)
+    outdir_path = Path(outdir) / cal_variant(cal_model, leakage, beam, sky_model, nside, mccs_eep)
     outdir_path.mkdir(parents=True, exist_ok=True)
 
     # Each station is independent; a worker holds one station in memory
@@ -269,6 +273,7 @@ def run_stefcal(
             beam=beam,
             suncal_kwargs=suncal_kwargs,
             nside=nside,
+            mccs_eep=mccs_eep,
             reuse=reuse_cal,
             ignore_static_flags=ignore_static_flags,
             flag_freqs=flag_freqs,
@@ -299,6 +304,7 @@ def run_stefcal(
             'cal_model': cal_model,
             'leakage': leakage,
             'beam': beam,
+            'mccs_eep': mccs_eep,
             **(suncal_kwargs or {}),
             'n_jobs': n_jobs,
             'reuse_cal': reuse_cal,
@@ -501,6 +507,7 @@ def main():
         beam=args.beam,
         suncal_kwargs=suncal_kwargs_from_args(args),
         nside=args.nside,
+        mccs_eep=args.mccs_eep,
         n_jobs=args.n_jobs,
         reuse_cal=args.reuse_cal,
         ignore_static_flags=args.ignore_static_flags,

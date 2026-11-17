@@ -2,17 +2,20 @@
 
 The `--cal-model` choices mccs-gsm, mccs-sun and mccs-sunfast are the GSM, SUN and SUN_FAST calibration types of
 the SFT 06.Calibration notebook, with its solver settings. SUN and GSM model the visibilities with the MCCS
-embedded element patterns (EEPs), set with $EEP_PATH, $EEP_FILE_NAME and $EEP_SUFFIX as in the SFT notebooks.
-These are in the solver's own file format, not ska-ost-low-uv's, so `--beam` doesn't apply.
+embedded element patterns (EEPs), chosen with `--mccs-eep`: `regular` is the solver's npz EEPs, set with
+$EEP_PATH, $EEP_FILE_NAME and $EEP_SUFFIX as in the SFT notebooks; `compressed-<name>` is `<name>.h5` (healpy alm,
+the ska-ost-low-uv EEP format) in $POSTX_EEP_DIR, e.g. compressed-harp for ska_low_harp.h5. `--beam` doesn't apply.
 """
 
 import os
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from ska_ost_low_uv.datamodel.cal import UVXAntennaCal, create_uvx_antenna_cal
 from ska_ost_low_uv.io.mccs_cal import POL4, QA_KEYS
+from ska_ost_low_uv.postx.aeps.eep_models import EEP_DIR_ENV
 from ska_ost_low_uv.utils import get_resource_path
 
 with warnings.catch_warnings():
@@ -32,19 +35,42 @@ SFT_KWARGS = {'refant': 1, 'niter': 10000, 'jones_niter': 500, 'gain_threshold':
 EEP_DEFAULTS = {'EEP_FILE_NAME': 'HARP_SKALA41_randvogel_1m_256_elem_50ohm_', 'EEP_SUFFIX': '.npz'}
 
 
-def eep_kwargs() -> dict:
-    """calibrate_mccs_visibility() EEP file options from $EEP_PATH, $EEP_FILE_NAME and $EEP_SUFFIX."""
+def _mccs_eeps() -> dict:
+    """--mccs-eep choices: 'regular' (npz, $EEP_PATH), and 'compressed-<name>': file stem per .h5 in $POSTX_EEP_DIR."""
+    eep_dir = os.environ.get(EEP_DIR_ENV)
+    stems = sorted(p.stem for p in Path(eep_dir).glob('*.h5')) if eep_dir else []
+    return {'regular': None} | {f'compressed-{s.removeprefix("ska_low_")}': s for s in stems}
+
+
+MCCS_EEPS = _mccs_eeps()
+
+
+def eep_kwargs(mccs_eep: str = 'regular') -> dict:
+    """calibrate_mccs_visibility() EEP file options for a --mccs-eep choice.
+
+    regular: from $EEP_PATH, $EEP_FILE_NAME and $EEP_SUFFIX. compressed-*: the .h5 file in $POSTX_EEP_DIR.
+    """
+    if MCCS_EEPS.get(mccs_eep):
+        return {'eep_path': os.environ[EEP_DIR_ENV], 'eep_filebase': MCCS_EEPS[mccs_eep], 'eep_suffix': '.h5'}
     env = {k: os.environ.get(k, EEP_DEFAULTS.get(k, '')) for k in ('EEP_PATH', 'EEP_FILE_NAME', 'EEP_SUFFIX')}
     return {'eep_path': env['EEP_PATH'], 'eep_filebase': env['EEP_FILE_NAME'], 'eep_suffix': env['EEP_SUFFIX']}
 
 
-def mccs_cal_problem(cal_model: str) -> str:
-    """Why an MCCS --cal-model can't run here, or '' if it can."""
+def mccs_cal_problem(cal_model: str, mccs_eep: str = 'regular') -> str:
+    """Why an MCCS --cal-model can't run here with these EEPs, or '' if it can."""
     if MCCS_CAL[cal_model].get('ignore_eeps'):
         return ''
-    path = eep_kwargs()['eep_path']
-    if not os.path.isdir(path):
-        return f'{cal_model} needs the MCCS EEPs: set $EEP_PATH ({path or "unset"}), or use mccs-sunfast.'
+    if mccs_eep not in MCCS_EEPS:
+        return f'No {mccs_eep} EEPs: set ${EEP_DIR_ENV} to the folder of .h5 EEPs before starting.'
+    kw = eep_kwargs(mccs_eep)
+    if MCCS_EEPS[mccs_eep]:
+        fn = os.path.join(kw['eep_path'], kw['eep_filebase'] + '.h5')
+        return '' if os.path.isfile(fn) else f'{mccs_eep}: {fn} not found.'
+    if not os.path.isdir(kw['eep_path']):
+        return (
+            f'{cal_model} needs the MCCS EEPs: set $EEP_PATH ({kw["eep_path"] or "unset"}), use a compressed '
+            f'--mccs-eep from ${EEP_DIR_ENV}, or use mccs-sunfast.'
+        )
     return ''
 
 
@@ -110,7 +136,12 @@ def to_sdp_vis(aa, eep_idx: np.ndarray):
 
 
 def mccs_calibrate_channel(
-    aa, cal_model: str, leakage: str = 'solve', nside: int = 64, antenna_flags: np.ndarray | None = None
+    aa,
+    cal_model: str,
+    leakage: str = 'solve',
+    nside: int = 64,
+    antenna_flags: np.ndarray | None = None,
+    mccs_eep: str = 'regular',
 ) -> tuple[UVXAntennaCal, dict]:
     """Calibrate the selected channel of a station with the MCCS solver, as the SFT does.
 
@@ -124,6 +155,7 @@ def mccs_calibrate_channel(
         leakage (str): 'solve' for the polarised (full-Jones) solve, 'none' for X and Y gains and an XY phase.
         nside (int): Healpix NSIDE of the GSM sky model.
         antenna_flags (np.ndarray): Bool (N_ant) antenna flags, added to the UVX static flags.
+        mccs_eep (str): A key of `MCCS_EEPS`, see `eep_kwargs()`.
 
     Returns:
         cal (UVXAntennaCal): Full-Jones cal of the channel.
@@ -144,7 +176,7 @@ def mccs_calibrate_channel(
             eep_rotation_deg=float(aa.uvx.antennas.attrs['array_rotation_angle'].values),
             **MCCS_CAL[cal_model],
             **SFT_KWARGS,
-            **eep_kwargs(),
+            **eep_kwargs(mccs_eep),
         )
     g = gt.gain.values[0, eep_idx, 0]  # (N_ant, 2, 2), correlator order
     bad = np.isin(eep_idx, masked) | ~np.isfinite(g).all(axis=(1, 2)) | (np.abs(np.linalg.det(g)) == 0)

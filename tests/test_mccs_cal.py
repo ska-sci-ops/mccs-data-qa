@@ -50,3 +50,20 @@ def test_mccs_calibrate_channel_recovers_gains():
     cg = (c @ g)[ok][:, [0, 1], [0, 1]]
     np.testing.assert_allclose(cg / cg[:1], 1, atol=1e-3)
     assert info['rel_residual'][[0, 3]].max() < 1e-3
+
+
+def test_eep_kwargs_regular_and_compressed(tmp_path, monkeypatch):
+    (tmp_path / 'ska_low_harp.h5').touch()
+    monkeypatch.setenv('POSTX_EEP_DIR', str(tmp_path))
+    monkeypatch.setenv('EEP_PATH', '/eeps')
+    monkeypatch.setattr(mccs_cal, 'MCCS_EEPS', mccs_cal._mccs_eeps())
+    assert list(mccs_cal.MCCS_EEPS) == ['regular', 'compressed-harp']
+    assert mccs_cal.eep_kwargs('compressed-harp') == {
+        'eep_path': str(tmp_path),
+        'eep_filebase': 'ska_low_harp',
+        'eep_suffix': '.h5',
+    }
+    assert mccs_cal.eep_kwargs('regular')['eep_path'] == '/eeps'
+    assert mccs_cal.eep_kwargs('regular')['eep_suffix'] == '.npz'
+    assert mccs_cal.mccs_cal_problem('mccs-gsm', 'compressed-harp') == ''
+    assert 'POSTX_EEP_DIR' in mccs_cal.mccs_cal_problem('mccs-gsm', 'compressed-feko')

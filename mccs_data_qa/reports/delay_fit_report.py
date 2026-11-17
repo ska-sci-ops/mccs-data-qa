@@ -27,6 +27,7 @@ from mccs_data_qa.reports.report import (
     figs,
     input_parser,
     parse_flag_freqs,
+    parse_stations,
     read_station,
     station_key,
     subtabs,
@@ -617,6 +618,8 @@ def main():
         Path(d).name: sorted(glob.glob(os.path.join(glob.escape(d), '*.cal')), key=station_key)
         for d in args.caldir
     }
+    if sel := parse_stations(args.stations):
+        cal_files = {run: [f for f in files if Path(f).stem in sel] for run, files in cal_files.items()}
     empty = [d for d, files in zip(args.caldir, cal_files.values(), strict=True) if not files]
     if empty:
         p.error(f'No .cal files in {empty}; run run_stefcal.py first')
