@@ -40,6 +40,7 @@ reports = [
 mccs-spider = "mccs_data_qa.cli:main"
 mccs-analyse = "mccs_data_qa.analyse:cli"
 mccs-convert-set = "mccs_data_qa.convert_set:main"
+mccs-convert-eb = "mccs_data_qa.convert_set:main_eb"
 mccs-report-ui = "mccs_data_qa.reports.report_ui:main"
 
 [[tool.uv.index]]

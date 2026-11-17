@@ -16,12 +16,12 @@ def get_eb(daq_dir, eb_id, n_expected):
     if os.path.isdir(f"{dirpath}/correlator_data"):
         dirpath = f"{dirpath}/correlator_data"
     n_files = len(glob.glob(f"{dirpath}/correlation*.hdf5"))
-    if n_files != n_expected:
+    if n_expected and n_files != n_expected:
         raise RuntimeError(f"Wrong number of files: {n_files} / {n_expected}")
     return dirpath
 
 
-def convert(daq_dir, eb_id, out_dir, n_expected):
+def convert(daq_dir, eb_id, out_dir, n_expected, quantise=None):
     # ponytail: lazy import, this only exists on the DAQ / jupyter host
     # hdf5_sweep_to_uvx writes zstd by default; ska_ost_low_uv.io imports hdf5plugin itself
     from ska_ost_low_uv.io import hdf5_sweep_to_uvx, get_hdf5_metadata
@@ -30,7 +30,8 @@ def convert(daq_dir, eb_id, out_dir, n_expected):
     md = get_hdf5_metadata(glob.glob(f"{dirpath}/correlation*.hdf5")[0])
     station_id = md['station_id'].lower()
     fn_out = f"{out_dir}/{eb_id}_{station_id}_sweep.uvx"
-    hdf5_sweep_to_uvx(dirpath, fn_out, telescope_name=station_id, return_uvx=False)
+    hdf5_sweep_to_uvx(dirpath, fn_out, telescope_name=station_id,
+                      quantise=quantise, return_uvx=False)
     return station_id, fn_out
 
 
@@ -43,7 +44,35 @@ def write_set_yaml(out_dir, set_id, s_all, filelist, args, argv):
         yaml.safe_dump(info, f, sort_keys=False)
 
 
-def main():
+def add_quantise_arg(p):
+    # quantise=None is lossless zstd; a step (in thermal-noise sigma) stores crosses as int16 (lossy)
+    p.add_argument('--lossy', '--quantise', dest='quantise', type=float, nargs='?', const=0.5, default=None,
+                   metavar='STEP', help="lossy: quantise crosses to STEP x thermal noise (default step 0.5, ~4x smaller)")
+
+
+def main_eb():
+    """ mccs-convert-eb: convert a single EB (an EB directory, or an EB ID under --daq-dir) to UVX. """
+    p = argparse.ArgumentParser(description=main_eb.__doc__)
+    p.add_argument('eb', help="EB directory (e.g. daq-data/eb-...) or EB ID")
+    p.add_argument('--daq-dir', default='/home/jovyan/daq-data', help="where to look up a bare EB ID")
+    p.add_argument('--out-dir', default='.')
+    p.add_argument('--n-expected', type=int, default=None, help="fail unless the EB has this many correlation files")
+    add_quantise_arg(p)
+    a = p.parse_args()
+
+    eb = a.eb.rstrip('/')
+    daq_dir, eb_id = os.path.split(os.path.abspath(eb)) if os.path.isdir(eb) else (a.daq_dir, eb)
+    os.makedirs(a.out_dir, exist_ok=True)
+    station_id, fn_out = convert(daq_dir, eb_id, a.out_dir, a.n_expected, a.quantise)
+    print(f"OK   {eb_id} {station_id} -> {fn_out}")
+
+
+def set_folder(out_dir, set_id, date):
+    """ Folder a set is converted to: <out_dir>/set<id>_<UTC date, yyyy-mm-dd>. """
+    return f"{out_dir}/set{set_id}_{pd.to_datetime(date):%Y-%m-%d}"
+
+
+def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('set_id', type=int, help="Set ID from calibration_sets.xlsx")
     p.add_argument('--xlsx', default='db/calibration_sets.xlsx')
@@ -52,7 +81,12 @@ def main():
     p.add_argument('--n-expected', type=int, default=385, help="expected correlation files per EB")
     p.add_argument('--include-failed', action='store_true', help="also convert observations flagged FAILED")
     p.add_argument('--list', action='store_true', help="show the set's observations and exit")
-    a = p.parse_args()
+    add_quantise_arg(p)
+    return p
+
+
+def main():
+    a = build_parser().parse_args()
 
     det = pd.read_excel(a.xlsx, sheet_name='Set Details')
     s = det[det['Set ID'] == a.set_id]
@@ -64,8 +98,7 @@ def main():
     if a.list:
         return
 
-    # per-set subdirectory: <out-dir>/set<id>_<UTC date, yyyy-mm-dd>
-    out_dir = f"{a.out_dir}/set{a.set_id}_{pd.to_datetime(s['Date (UTC)'].iloc[0]):%Y-%m-%d}"
+    out_dir = set_folder(a.out_dir, a.set_id, s['Date (UTC)'].iloc[0])
 
     s_all = s
     if not a.include_failed:
@@ -78,7 +111,7 @@ def main():
     bad, filelist = [], []
     for eb_id in s['Observation ID']:
         try:
-            station_id, fn_out = convert(a.daq_dir, eb_id, out_dir, a.n_expected)
+            station_id, fn_out = convert(a.daq_dir, eb_id, out_dir, a.n_expected, a.quantise)
             print(f"OK   {eb_id} {station_id} -> {fn_out}")
             filelist.append(dict(observation_id=eb_id, station_id=station_id, file=fn_out, status='ok'))
         except Exception as e:

@@ -298,7 +298,7 @@ def test_report_ui_qa(tmp_path, monkeypatch):
     from mccs_data_qa.reports import report_ui
 
     monkeypatch.setattr(report_ui, 'RUNS', {})
-    monkeypatch.setitem(report_ui.STATE, 'initials', 'ab')
+    monkeypatch.setattr(report_ui, 'reviewer', lambda: 'ab')  # Per browser in the UI
     quick = report_ui.report_dir(tmp_path, 'quicklook')
     cal = report_ui.report_dir(tmp_path, 'calibration')
     assert report_ui.qa_choices(quick) == report_ui.STATION_QA

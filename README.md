@@ -2,7 +2,7 @@
 
 * mccs_data_qa/ (`mccs-spider`): Runs on MCCS server, extracts HDF5 file metadata and creates database.
 * mccs_data_qa/analyse.py (`mccs-analyse`): Builds the analysis workbook (sweep QA, coverage histograms, calibration sets) from `db/latest.csv`.
-* mccs_data_qa/convert_set.py (`mccs-convert-set`): Converts every sweep in a calibration set to UVX, with a `calibration_set.yaml`.
+* mccs_data_qa/convert_set.py (`mccs-convert-set`): Converts every sweep in a calibration set to UVX, with a `calibration_set.yaml`. `mccs-convert-eb` converts a single EB. Both take `--lossy [STEP]` for quantised (lossy) crosses.
 * mccs_data_qa/reports/ (`mccs-report-ui`): Web UI and scripts for QA reports (quicklook, stefcal, delay fit, Sun holography, sensitivity) on calibration sets.
 * app.py: Runs on scs server, simple Panel app to view the MCCS observation database.
 
@@ -14,7 +14,7 @@ To do so:
 * login to the Juptyerhub at https://k8s.mccs.low.internal.skao.int/jupyterhub/
 * open a new terminal session
 * cd `/home/jovyan/shared/Danny/mccs-spider-search`
-* run `mccs-spider` (after `uv pip install .`; add `--no-skip-existing` to re-spider everything)
+* run `mccs-spider --analyse` (after `uv pip install .`; add `--no-skip-existing` to re-spider everything; `--analyse` also rebuilds the workbooks below)
 
 This will spider the files and create the database (a CSV file). This file is uploaded to 
 acacia via rclone:
@@ -46,6 +46,19 @@ Convert a calibration set, then browse to its parent folder in the report UI:
 mccs-convert-set 614 --out-dir sweeps
 mccs-report-ui --root sweeps    # then open http://127.0.0.1:8080
 ```
+
+Or convert from the UI: start it with the database folder (and the DAQ folder, if not `/home/jovyan/daq-data`),
+
+```
+mccs-report-ui --root sweeps --db db [--daq-dir /home/jovyan/daq-data]
+```
+
+then open **Calibration sets** in the header. It lists every set in `db/calibration_sets.xlsx`, with
+per-column filters, a search box, CSV export, the set QA marked in the report UI, and a Convert button per
+row. Conversions go into `--root` with the Convert options. **Update database** runs `mccs-spider --analyse`
+(spider, then `mccs-analyse`, then the acacia upload, which a switch can turn off) and reloads the table.
+These jobs run one at a time, alongside the reports. QA marks record the reviewer's initials, set from the
+header chip and kept per browser.
 
 On the MCCS JupyterHub, start the UI from a hub terminal and open it through jupyter-server-proxy,
 at `https://k8s.mccs.low.internal.skao.int/jupyterhub/user/<name>/proxy/8080/` (`mccs-report-ui` prints the path). If `pip show jupyter-server-proxy` finds nothing, `pip install --user

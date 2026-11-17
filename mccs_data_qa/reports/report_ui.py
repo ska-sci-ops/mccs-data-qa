@@ -8,8 +8,12 @@ that the delay fit and sensitivity reports read; `reports/calibration/index.html
 fit and sensitivity read the runs picked on their cards. Runs one report at a time; others wait in a queue
 shared across sets, managed in the Queue tab. Quicklooks go to the front of the queue.
 
+The Calibration sets page (`sets/`) lists every set in `<db>/calibration_sets.xlsx`, converts a set into
+`--root` with mccs-convert-set, and updates the database (mccs-spider, then mccs-analyse). These run in their own
+queue, one at a time, alongside the reports.
+
 Usage:
-    mccs-report-ui [--root DIR] [--port 8080] # then open http://127.0.0.1:8080
+    mccs-report-ui [--root DIR] [--db db] [--daq-dir DIR] [--port 8080] # then open http://127.0.0.1:8080
 
 In JupyterHub (needs jupyter-server-proxy), open <hub>/user/<name>/proxy/8080/ instead.
 """
@@ -128,7 +132,12 @@ QA_ICON = {
 # SKAO brand: Blueshift navy and Redshift magenta, in the shades of the SKAO slide template, with the
 # Noto Sans family (Light for headings, Regular for small text, Mono for technical text, Verdana fallback).
 SKAO_COLORS = {'primary': '#0A1D45', 'secondary': '#AF0B62', 'accent': '#E20E7F', 'dark': '#0A1D45'}
-SKAO_HEAD = """<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:ital,wght@0,300;0,400;0,600;0,700;1,400&family=Noto+Sans+Mono&display=swap">
+SKAO_HEAD = """<script>
+// Report URLs are page-relative ('files/...'), so the page must end in '/': opened at <hub>/proxy/8080
+// they would resolve to <hub>/proxy/files/... and 404. Add the slash before anything loads.
+if (!location.pathname.endsWith('/')) location.replace(location.pathname + '/' + location.search + location.hash);
+</script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans:ital,wght@0,300;0,400;0,600;0,700;1,400&family=Noto+Sans+Mono&display=swap">
 <style>
 body, .q-field, .q-btn, .text-h6, .text-subtitle1, .text-caption {
   font-family: 'Noto Sans', Verdana, sans-serif; }
@@ -180,9 +189,14 @@ class Run:
         return str(timedelta(seconds=int((self.finished or time.time()) - self.started)))
 
     @property
+    def module(self) -> str:
+        """Module run with `python -m`: a report script's name, or a dotted module (convert, spider)."""
+        return self.script if '.' in self.script else f'mccs_data_qa.reports.{self.script}'
+
+    @property
     def command(self) -> str:
         """The command line, for display."""
-        return shlex.join(['python', '-m', f'mccs_data_qa.reports.{self.script}', *self.argv])
+        return shlex.join(['python', '-m', self.module, *self.argv])
 
     def report(self) -> Path | None:
         """The report page, once the script has written it."""
@@ -239,10 +253,25 @@ class Job:
 
 RUNS: dict[Path, Run] = {}  # Runs started since the UI started, by report folder
 QUEUE: list[Job] = []  # In memory, so lost if the UI restarts
+# Convert and database-update jobs: their own queue, one at a time, alongside the reports
+TOOL_RUNS: dict[Path, Run] = {}
+TOOL_QUEUE: list[Run] = []  # Not started yet
 FORM_VALUES: dict[str, dict] = {}
 PARSERS: dict = {}
-# Browsed folder, selected set and reviewer initials, kept across page reloads
-STATE = {'dir': DEFAULT_ROOT, 'set': None, 'initials': ''}
+# Browsed folder and selected set, kept across page reloads; db and DAQ folders for the sets page
+STATE = {'dir': DEFAULT_ROOT, 'set': None, 'root': DEFAULT_ROOT, 'db': Path('db'), 'daq_dir': Path('/home/jovyan/daq-data')}
+
+
+def reviewer() -> str:
+    """Reviewer initials of this browser, recorded with QA marks."""
+    return app.storage.user.get('initials', '')
+
+
+def by_line(mark: dict) -> str:
+    """'by DP, 2 h ago' for a QA mark, or ''."""
+    if not mark.get('updated'):
+        return ''
+    return f'by {mark.get("by") or "?"}, {ago(mark["updated"])}'
 
 
 def url(path: Path) -> str:
@@ -392,8 +421,8 @@ def write_station_marks(d: Path, marks: dict, by: str):
 def save_station_qa(d: Path, station: str, status: str | None, note: str):
     """Write the QA mark and note of a station in the run in a folder."""
     marks = station_marks(d)
-    marks[station] = {'status': status, 'note': note, 'by': STATE['initials'], 'updated': time.time()}
-    write_station_marks(d, marks, STATE['initials'])
+    marks[station] = {'status': status, 'note': note, 'by': reviewer(), 'updated': time.time()}
+    write_station_marks(d, marks, reviewer())
 
 
 def flag_qa(n_flagged: int) -> str:
@@ -445,7 +474,7 @@ def save_set_qa(setdir: Path, status: str | None, note: str):
     """Write the QA mark and note of a set."""
     path = set_qa_path(setdir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    mark = {'status': status, 'note': note, 'by': STATE['initials'], 'updated': time.time()}
+    mark = {'status': status, 'note': note, 'by': reviewer(), 'updated': time.time()}
     path.write_text(json.dumps(mark, indent=1))
 
 
@@ -562,10 +591,11 @@ async def _pump(r: Run, stream: asyncio.StreamReader, log):
     r.progress = ''
 
 
-async def _execute(r: Run):
-    """Run a report script, streaming its output into the run, then start the next queued job."""
+async def _execute(r: Run, then=None):
+    """Run a script, streaming its output into the run, then start the next queued job (`then`, default
+    `start_queued`)."""
     env = {**os.environ, 'MPLBACKEND': 'Agg', 'PYTHONUNBUFFERED': '1'}
-    cmd = [sys.executable, '-m', f'mccs_data_qa.reports.{r.script}', *r.argv]
+    cmd = [sys.executable, '-m', r.module, *r.argv]
     shutdown = False
     try:
         with open(r.dir / 'run.log', 'w') as log:
@@ -596,7 +626,7 @@ async def _execute(r: Run):
                     auto_station_qa(r.dir)
                 except Exception:
                     logger.exception(f'Cannot set station QA marks for {r.dir}')
-            start_queued()
+            (then or start_queued)()
 
 
 def start_run(job: Job) -> Run:
@@ -618,6 +648,25 @@ def run_for(d: Path, name: str) -> Run | None:
     r = RUNS.get(d) or Run.load(d)
     if r is None and (d / 'index.html').exists():
         r = Run(d, SCRIPTS[name], [], (d / 'index.html').stat().st_mtime, returncode=0)
+    return r
+
+
+def start_tool():
+    """Start the first queued convert / database-update job, if none is running."""
+    if TOOL_QUEUE and not any(r.live for r in TOOL_RUNS.values()):
+        r = TOOL_QUEUE.pop(0)
+        r.started, r.live = time.time(), True
+        r.dir.mkdir(parents=True, exist_ok=True)
+        r.save()
+        TOOL_RUNS[r.dir] = r
+        background_tasks.create(_execute(r, start_tool))
+
+
+def enqueue_tool(d: Path, module: str, argv: list[str]) -> Run:
+    """Queue a convert / database-update job (`python -m module argv`, logging to d/run.log)."""
+    r = Run(d, module, argv, time.time())
+    TOOL_QUEUE.append(r)
+    start_tool()
     return r
 
 
@@ -837,6 +886,53 @@ def _options_form(script: str):
             _field_widget(f, values)
 
 
+async def ask_reviewer() -> bool:
+    """Ask for the reviewer's initials if this browser has none; False if the user cancels."""
+    if reviewer():
+        return True
+    with ui.dialog() as dialog, ui.card().classes('w-80'):
+        ui.label('Who is reviewing?').classes('text-h6')
+        ui.label('Your initials are recorded with your QA marks (kept in this browser).').classes(
+            'text-xs text-grey-7'
+        )
+        box = ui.input('Initials').props('autofocus').classes('w-full')
+        box.on('keydown.enter', lambda: dialog.submit(box.value.strip()))
+        with ui.row().classes('w-full justify-end'):
+            ui.button('Cancel', on_click=lambda: dialog.submit('')).props('flat no-caps')
+            ui.button('Save', on_click=lambda: dialog.submit(box.value.strip())).props('unelevated no-caps')
+    initials = await dialog
+    dialog.delete()
+    if initials:
+        app.storage.user['initials'] = initials
+    return bool(initials)
+
+
+def reviewer_chip():
+    """Header button showing the reviewer's initials, highlighted when unset, with a menu to change them."""
+    store = app.storage.user
+    store.setdefault('initials', '')
+    btn = ui.button(icon='person').props('unelevated rounded dense no-caps padding="2px 12px"')
+
+    def show():
+        i = store['initials']
+        btn.set_text(f'Reviewer: {i}' if i else 'Set reviewer')
+        btn.props(f'color={"white" if i else "accent"} text-color={"primary" if i else "white"}')
+
+    with btn, ui.menu().classes('p-3 w-64'):
+        ui.label('Reviewer initials').classes('eyebrow')
+        ui.label('Recorded with your QA marks, in this browser.').classes('text-xs text-grey-7')
+        ui.input(placeholder='e.g. AB', on_change=show).bind_value(store, 'initials').props('dense autofocus')
+    show()
+
+
+def brand(title: str):
+    """SKAO colours, fonts and logo, and the page title, at the start of a page's header."""
+    ui.colors(**SKAO_COLORS, **{f'qa_{k}': v for k, v in QA_HEX.items()})
+    ui.add_head_html(SKAO_HEAD)
+    ui.html((HERE / 'skao_logo.svg').read_text(), sanitize=False).classes('skao-logo w-20 mx-2')
+    ui.label(title).classes('text-h6')
+
+
 @ui.page('/')
 def index():
     """The single page: folder browser in a drawer, report cards, and set info, log and report tabs."""
@@ -877,24 +973,34 @@ def index():
                 for c in choices
             }
             note = ui.input(placeholder='Note', value=mark.get('note', '')).props('dense').classes('grow')
+            by = ui.label(by_line(mark)).classes('text-xs text-grey-7 whitespace-nowrap')
         last = [(status[0], note.value)]
 
-        def pick(c: str):
+        async def pick(c: str):
             # A second click on the selected mark clears it
             status[0] = None if status[0] == c else c
-            on_change()
+            await on_change()
 
-        def on_change():
+        def paint():
             for c, b in btns.items():
                 on = c == status[0]
                 color = qa_color(c) if on else 'grey-2'
                 b.props(f'color={color} text-color={"primary" if on else "grey-8"}')
+
+        async def on_change():
             if (status[0], note.value) != last[0]:
+                if not await ask_reviewer():
+                    status[0], _ = last[0]  # Not saved without initials
+                    note.value = last[0][1]
+                    paint()
+                    return
                 last[0] = (status[0], note.value)
                 save(status[0], note.value)
+                by.set_text(f'by {reviewer()}, just now')
                 folder.refresh()
+            paint()
 
-        on_change()
+        paint()
         note.on('blur', on_change)
 
     def qa_menu(d: Path, choices: tuple):
@@ -1519,8 +1625,6 @@ def index():
         tasks_col.set_visibility(not tasks_col.visible)
         splitter.set_value(view.get('tasks_width', 34) if tasks_col.visible else 0)
 
-    ui.colors(**SKAO_COLORS, **{f'qa_{k}': v for k, v in QA_HEX.items()})
-    ui.add_head_html(SKAO_HEAD)
     with ui.header().classes('items-center gap-2'):
         ui.button(icon='menu', on_click=lambda: drawer.toggle()).props('flat round color=white').tooltip(
             'Show or hide the folder panel'
@@ -1528,13 +1632,13 @@ def index():
         ui.button(icon='view_sidebar', on_click=lambda: toggle_tasks()).props('flat round color=white').tooltip(
             'Show or hide the report tasks'
         )
-        ui.html((HERE / 'skao_logo.svg').read_text(), sanitize=False).classes('skao-logo w-20 mx-2')
-        ui.label('SKA-Low UV reports').classes('text-h6')
+        brand('SKA-Low UV reports')
         set_title = ui.label().classes('text-subtitle1 opacity-80')
         ui.space()
-        ui.input(placeholder='Initials').bind_value(STATE, 'initials').props('dense dark borderless').classes(
-            'w-20'
-        ).tooltip('Recorded with your QA marks')
+        ui.button('Calibration sets', icon='table_view', on_click=lambda: ui.navigate.to('sets/')).props(
+            'flat no-caps color=white'
+        ).tooltip('Browse, convert and update the calibration sets')
+        reviewer_chip()
     with ui.left_drawer(value=True, bordered=True).props('width=360') as drawer:
         folder()
     with ui.splitter(value=34).classes('w-full') as splitter:
@@ -1589,26 +1693,541 @@ def index():
         show(view['run'])
 
 
+# --- Calibration sets page: browse calibration_sets.xlsx, convert sets, update the database ----------------
+
+# calibration_sets.xlsx 'Calibration Sets' column: grid field
+SET_FIELDS = {
+    'Set ID': 'set_id',
+    'Date (UTC)': 'date',
+    'LST (hr)': 'lst',
+    'UTC Time': 'utc',
+    'Perth Local Time (AWST)': 'awst',
+    'Day/Night (AWST)': 'day',
+    'Observations': 'n_obs',
+    'Stations': 'stations',
+    'Failed': 'n_failed',
+    'Failed stations': 'failed_stations',
+    'Status': 'status',
+}
+DETAIL_COLS = ('Station ID', 'Observation ID', 'UTC Start', 'n_files', 'Duration (s)', 'Status', 'error')
+# Set folder options of mccs-convert-set, filled in by the page
+CONVERT_SET_ARGS = ('set_id', 'xlsx', 'daq_dir', 'out_dir', 'list')
+CONVERT, SPIDER = 'mccs_data_qa.convert_set', 'mccs_data_qa.cli'
+SETS_CSS = """<style>
+.sets-grid { --ag-font-family: 'Noto Sans', Verdana, sans-serif; --ag-font-size: 13px;
+  --ag-header-background-color: #EEF0F6; --ag-header-text-color: #0A1D45; --ag-accent-color: #AF0B62;
+  --ag-selected-row-background-color: #F7E6EF; --ag-row-hover-color: #F3F4F8; --ag-border-radius: 8px; }
+.sets-grid .ag-row.sets-failed { background-color: #FFF4F4; }
+.sets-grid .ag-row.sets-failed.ag-row-selected { background-color: #F7E6EF; }
+.sets-act { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border-radius: 13px;
+  font: 600 12px 'Noto Sans', sans-serif; border: 1px solid transparent; cursor: pointer; line-height: 1; }
+.sets-act.primary { background: #0A1D45; color: #fff; }
+.sets-act.primary:hover { background: #AF0B62; }
+.sets-act.ghost { background: transparent; color: #0A1D45; border-color: #C9CEDB; }
+.sets-act.ghost:hover { border-color: #AF0B62; color: #AF0B62; }
+.sets-act.warn { background: #FFE3E4; color: #9B1C22; }
+.sets-act.busy { background: #EEF0F6; color: #5B6478; cursor: default; }
+.sets-spin { width: 10px; height: 10px; border: 2px solid #C9CEDB; border-top-color: #AF0B62; border-radius: 50%;
+  animation: sets-spin .8s linear infinite; }
+@keyframes sets-spin { to { transform: rotate(360deg); } }
+.sets-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 10px;
+  font-size: 12px; line-height: 18px; color: #0A1D45; }
+.sets-chip .material-icons, .sets-icons .material-icons { font-size: 15px; }
+.sets-icons { display: inline-flex; gap: 4px; color: #5B6478; }
+.sets-link { cursor: pointer; }
+.sets-link:hover .sets-chip, .sets-link:hover.sets-icons { outline: 1px solid #AF0B62; }
+</style>"""
+
+
+def _chip(color: str, text: str, icon: str = '') -> str:
+    """JS template literal for a chip; color, text and icon are JS expressions."""
+    i = f'<span class="material-icons">${{{icon}}}</span>' if icon else ''
+    return f'`<span class="sets-chip" style="background:${{{color}}}">{i}${{{text}}}</span>`'
+
+
+ACTION_JS = """p => {
+  const v = p.value || '';
+  if (v === 'running') return '<span class="sets-act busy"><span class="sets-spin"></span>Converting</span>';
+  if (v.startsWith('queued')) return `<span class="sets-act busy">Queued #${v.split(' ')[1]}</span>`;
+  const [label, cls] = {convert: ['Convert', 'primary'], reconvert: ['Re-convert', 'ghost'],
+                        failed: ['Retry', 'warn']}[v] || [v, 'ghost'];
+  return `<button class="sets-act ${cls}">${label}</button>`;
+}"""
+QA_JS = f"""p => {{
+  if (!p.value) return '<span style="color:#C1C6C8">—</span>';
+  const hex = {json.dumps(QA_HEX)}, icon = {json.dumps(QA_ICON)};
+  return `<span class="sets-link">` + {_chip("hex[p.value] || '#C1C6C8'", "p.value.replace('_', ' ')", "icon[p.value] || 'help_outline'")} + '</span>';
+}}"""
+STATUS_JS = f"""p => {_chip("p.value === 'FAILED' ? '#FFE3E4' : '#E3F5EA'", 'p.value')}"""
+DAY_JS = """p => p.value ? `<span class="sets-icons"><span class="material-icons">${p.value === 'Day' ? 'wb_sunny' : 'bedtime'}</span>${p.value}</span>` : ''"""
+REPORTS_JS = f"""p => {{
+  const info = {json.dumps({n: [INFO[n][0], INFO[n][1]] for n in INFO})};
+  const v = p.value || [];
+  return v.length ? '<span class="sets-icons sets-link">' + v.map(n =>
+    `<span class="material-icons" title="${{info[n][1]}}">${{info[n][0]}}</span>`).join('') + '</span>' : '';
+}}"""
+TIME_JS = "p => p.value ? p.value.slice(11, 16) : ''"
+# Date filter on ISO strings: compare their date part with the picked local midnight
+DATE_FILTER = """{comparator: (f, v) => { if (!v) return -1; const d = new Date(v.slice(0, 10) + 'T00:00:00');
+  return d < f ? -1 : d > f ? 1 : 0; }, buttons: ['clear'], inRangeInclusive: true}"""
+
+
+def set_columns() -> list[dict]:
+    """AG Grid column definitions of the sets grid. Fields hold raw values; renderers draw chips and buttons."""
+    num = {'filter': 'agNumberColumnFilter'}
+    return [
+        {
+            'field': 'action',
+            'headerName': '',
+            'pinned': 'left',
+            'width': 140,
+            'sortable': False,
+            'headerTooltip': 'Convert the set to UVX in the --root folder (options: Convert options)',
+            'filter': False,
+            ':cellRenderer': ACTION_JS,
+        },
+        {'field': 'set_id', 'headerName': 'Set', 'width': 95, 'sort': 'desc', **num},
+        {
+            'field': 'date',
+            'headerName': 'Date (UTC)',
+            'width': 150,
+            'filter': 'agDateColumnFilter',
+            ':filterParams': DATE_FILTER,
+            ':valueFormatter': "p => p.value ? p.value.slice(0, 10) : ''",
+        },
+        {'field': 'qa', 'headerName': 'Set QA', 'width': 160, 'tooltipField': 'qa_tip', ':cellRenderer': QA_JS},
+        {'field': 'reports', 'headerName': 'Reports', 'width': 130, ':cellRenderer': REPORTS_JS,
+         'headerTooltip': 'Reports run on the set; click to open the set in the report UI'},
+        {'field': 'status', 'headerName': 'Status', 'width': 105, ':cellRenderer': STATUS_JS},
+        {'field': 'lst', 'headerName': 'LST (h)', 'width': 105, ':valueFormatter': 'p => p.value?.toFixed(1)', **num},
+        {'field': 'utc', 'headerName': 'UTC', 'width': 95, ':valueFormatter': TIME_JS},
+        {'field': 'awst', 'headerName': 'AWST', 'width': 95, ':valueFormatter': TIME_JS},
+        {'field': 'day', 'headerName': 'Day/Night', 'width': 115, ':cellRenderer': DAY_JS},
+        {'field': 'n_obs', 'headerName': 'Obs', 'width': 85, **num},
+        {'field': 'stations', 'headerName': 'Stations', 'flex': 2, 'minWidth': 180, 'tooltipField': 'stations'},
+        {'field': 'n_failed', 'headerName': 'Failed', 'width': 95, **num},
+        {'field': 'failed_stations', 'headerName': 'Failed stations', 'flex': 1, 'minWidth': 140,
+         'tooltipField': 'failed_stations'},
+    ]
+
+
+@functools.lru_cache(maxsize=2)
+def _read_sets(xlsx: Path, mtime: float) -> tuple[list[dict], dict[int, list[dict]]]:
+    """The set rows and their observations from calibration_sets.xlsx (cached per file version)."""
+    import pandas as pd
+
+    sheets = pd.read_excel(xlsx, sheet_name=['Calibration Sets', 'Set Details'])
+    summary = sheets['Calibration Sets'].rename(columns=SET_FIELDS)
+    rows = json.loads(summary[[c for c in SET_FIELDS.values() if c in summary]].to_json(orient='records', date_format='iso'))
+    det = sheets['Set Details']
+    det = det[[c for c in ('Set ID', *DETAIL_COLS) if c in det]]
+    details = {
+        int(k): json.loads(g.drop(columns='Set ID').to_json(orient='records', date_format='iso'))
+        for k, g in det.groupby('Set ID')
+    }
+    return rows, details
+
+
+def load_sets(xlsx: Path, root: Path) -> tuple[list[dict], dict[int, list[dict]]]:
+    """Set rows for the grid, each with the folder it converts to, and the observations of each set.
+
+    Returns ([], {}) if the workbook doesn't exist yet. Rows are copies, so a page can update them.
+    """
+    from mccs_data_qa.convert_set import set_folder
+
+    if not xlsx.exists():
+        return [], {}
+    rows, details = _read_sets(xlsx, xlsx.stat().st_mtime)
+    rows = [r | {'folder': set_folder(root, r['set_id'], r['date'])} | set_row_state(r, set()) for r in rows]
+    return rows, details
+
+
+def convert_dir(setdir: Path) -> Path:
+    """Folder of a set's convert run (its run.log)."""
+    return setdir / 'reports' / 'convert'
+
+
+def tool_queued(d: Path) -> int | None:
+    """1-based position of a run folder in the convert / database-update queue, or None."""
+    return next((i + 1 for i, r in enumerate(TOOL_QUEUE) if r.dir == d), None)
+
+
+def set_row_state(row: dict, existing: set[str]) -> dict:
+    """The parts of a set's grid row that change: action, set QA (+ tooltip) and reports.
+
+    Args:
+        row (dict): Grid row, with 'folder'.
+        existing (set): Names of the folders in the convert folder, so sets never converted cost no disk reads.
+    """
+    d = Path(row['folder']) if 'folder' in row else None
+    st = {'action': 'convert', 'qa': '', 'qa_tip': 'Not converted', 'reports': []}
+    if d is None:
+        return st
+    conv = convert_dir(d)
+    r = TOOL_RUNS.get(conv)
+    if pos := tool_queued(conv):
+        st['action'] = f'queued {pos}'
+    elif r is not None and r.live:
+        st['action'] = 'running'
+    if d.name not in existing:
+        return st
+    # mccs-convert-set exits 1 if any EB failed, but still writes the yaml: offer a retry either way
+    rc = r.returncode if r is not None else read_json(conv / 'run.json').get('returncode')
+    if st['action'] == 'convert' and rc not in (0, None):
+        st['action'] = 'failed'
+    if (d / SET_YAML).exists():
+        if st['action'] == 'convert':
+            st['action'] = 'reconvert'
+        mark = read_json(set_qa_path(d))
+        st['qa'] = mark.get('status') or 'unreviewed'
+        tip = ', '.join(x for x in (by_line(mark), mark.get('note')) if x)
+        st['qa_tip'] = tip or 'Not reviewed yet: click to open the set and mark it'
+        st['reports'] = [n for n in SCRIPTS if (run_dir(d, n) / 'index.html').exists()]
+    return st
+
+
+def tool_label(r: Run) -> str:
+    """'Convert set614_2025-03-01' or 'Update database'."""
+    return 'Update database' if r.script == SPIDER else f'Convert {r.dir.parent.parent.name}'
+
+
+def tool_status(r: Run) -> tuple[str, str]:
+    """(status text, badge colour) of a convert / database-update job."""
+    if pos := tool_queued(r.dir):
+        return f'queued #{pos}', STATUS_COLOR['queued']
+    return r.status, STATUS_COLOR.get(r.status, 'negative')
+
+
+@ui.page('/sets/')
+async def sets_page():
+    """Calibration sets: a grid of calibration_sets.xlsx with a Convert button per set, and the database update."""
+    root, db = STATE['root'], STATE['db']
+    xlsx = db / 'calibration_sets.xlsx'
+    rows, details = await run.io_bound(load_sets, xlsx, root)
+    by_id = {r['set_id']: r for r in rows}
+    view = {'set': None, 'run': None, 'n': 0, 'mtime': xlsx.stat().st_mtime if xlsx.exists() else None, 'jobs': None}
+    if PARSERS.get(CONVERT) is None:
+        from mccs_data_qa.convert_set import build_parser
+
+        PARSERS[CONVERT] = build_parser()
+    fields = [f for f in form_fields(PARSERS[CONVERT]) if f.dest not in CONVERT_SET_ARGS]
+    values = FORM_VALUES.setdefault(CONVERT, default_values(fields))
+    spider = FORM_VALUES.setdefault(SPIDER, {'all': False, 'upload': True})
+
+    def existing() -> set[str]:
+        return {p.name for p in root.iterdir()} if root.is_dir() else set()
+
+    names = existing()
+    for r in rows:
+        r.update(set_row_state(r, names))
+
+    def refresh_rows():
+        """Push the rows whose action, QA or reports changed, keeping the grid's filters, sort and scroll."""
+        names = existing()
+        changed = []
+        for r in rows:
+            st = set_row_state(r, names)
+            if any(r[k] != v for k, v in st.items()):
+                r.update(st)
+                changed.append(r)
+        if changed:
+            grid.run_grid_method('applyTransaction', {'update': changed})
+        if view['set'] is not None and view['set'] in {r['set_id'] for r in changed}:
+            selected.refresh()
+
+    async def reload_if_new():
+        """Reload the grid when the database update rewrites calibration_sets.xlsx."""
+        mtime = xlsx.stat().st_mtime if xlsx.exists() else None
+        if mtime == view['mtime']:
+            return
+        view['mtime'] = mtime
+        new, det = await run.io_bound(load_sets, xlsx, root)
+        rows[:] = new
+        details.clear()
+        details.update(det)
+        by_id.clear()
+        by_id.update({r['set_id']: r for r in rows})
+        # rows is the list in grid.options, refilled in place; assigning grid.options would rebuild the grid
+        # and drop its filters and sort
+        grid.run_grid_method('setGridOption', 'rowData', rows)
+        updated.set_text(workbook_text())
+        empty.set_visibility(not rows)
+        refresh_rows()
+        ui.notify(f'Reloaded {len(rows)} calibration sets')
+
+    def workbook_text() -> str:
+        return f'{xlsx.name}, updated {ago(view["mtime"])}' if view['mtime'] else f'No {xlsx}'
+
+    def open_in_reports(d: Path):
+        STATE['dir'], STATE['set'] = d.parent, d
+        ui.navigate.to('../')
+
+    async def convert(row: dict):
+        d = Path(row['folder'])
+        conv = convert_dir(d)
+        if row['action'] == 'running' or row['action'].startswith('queued'):
+            show_job(TOOL_RUNS.get(conv) or next(r for r in TOOL_QUEUE if r.dir == conv))
+            return
+        if (d / SET_YAML).exists() and not await confirm_reconvert(row, d):
+            return
+        argv = [
+            str(row['set_id']),
+            f'--xlsx={xlsx}',
+            f'--daq-dir={STATE["daq_dir"]}',
+            f'--out-dir={root}',
+            *build_argv(fields, values),
+        ]
+        r = enqueue_tool(conv, CONVERT, argv)
+        show_job(TOOL_RUNS.get(conv) or r)
+        refresh_rows()
+
+    async def confirm_reconvert(row: dict, d: Path) -> bool:
+        with ui.dialog() as dialog, ui.card().classes('max-w-md'):
+            ui.label(f'Re-convert set {row["set_id"]}?').classes('text-h6')
+            ui.label(f'This rewrites the UVX files and {SET_YAML} in {d}. Its reports are kept.')
+            with ui.row().classes('w-full justify-end'):
+                ui.button('Cancel', on_click=lambda: dialog.submit(False)).props('flat no-caps')
+                ui.button('Re-convert', icon='replay', on_click=lambda: dialog.submit(True)).props(
+                    'unelevated no-caps'
+                )
+        ok = await dialog
+        dialog.delete()
+        return bool(ok)
+
+    def update_db():
+        d = root / '.update_db'  # Hidden from the folder browser, and outside db/ so it isn't uploaded
+        if TOOL_RUNS.get(d, Run(d, '', [], 0)).live or tool_queued(d):
+            ui.notify('A database update is already running or queued')
+            return
+        argv = [str(STATE['daq_dir']), f'--outdir={db}', '--analyse']
+        argv += ['--no-skip-existing'] * spider['all'] + ['--no-upload'] * (not spider['upload'])
+        show_job(TOOL_RUNS.get(d) or enqueue_tool(d, SPIDER, argv))
+
+    async def on_cell(e):
+        a = e.args
+        row = by_id.get((a.get('data') or {}).get('set_id'))
+        if row is None:
+            return
+        view['set'] = row['set_id']
+        selected.refresh()
+        col = a.get('colId')
+        if col == 'action':
+            await convert(row)
+        elif col in ('qa', 'reports') and (Path(row['folder']) / SET_YAML).exists():
+            open_in_reports(Path(row['folder']))
+
+    def show_job(r: Run):
+        view.update(run=r, n=0)
+        log.clear()
+        jobs.refresh()
+
+    @ui.refreshable
+    def selected():
+        row = by_id.get(view['set'])
+        if row is None:
+            ui.label('Click a set to see its observations. Convert starts from the button on each row.').classes(
+                'text-xs text-grey-7'
+            )
+            return
+        d = Path(row['folder'])
+        converted = (d / SET_YAML).exists()
+        ui.label(f'Calibration set {row["set_id"]}').classes('eyebrow')
+        with ui.row().classes('w-full items-center gap-2'):
+            lst = f'LST {row["lst"]:.1f} h' if row.get('lst') is not None else ''
+            title = ' · '.join(x for x in ((row.get('date') or '')[:10], lst, row.get('day')) if x)
+            ui.label(title).classes('text-h6')
+            ui.space()
+            if converted:
+                ui.button('Open in reports', icon='open_in_new', on_click=lambda: open_in_reports(d)).props(
+                    'flat dense no-caps'
+                )
+            if (convert_dir(d) / 'run.json').exists() or convert_dir(d) in TOOL_RUNS:
+                ui.button(
+                    'Convert log',
+                    icon='terminal',
+                    on_click=lambda: show_job(TOOL_RUNS.get(convert_dir(d)) or Run.load(convert_dir(d))),
+                ).props('flat dense no-caps')
+            label = {'convert': 'Convert', 'reconvert': 'Re-convert', 'failed': 'Retry'}.get(row['action'])
+            ui.button(label or row['action'].capitalize(), icon='sync', on_click=lambda: convert(row)).props(
+                'unelevated dense no-caps'
+            ).set_enabled(bool(label))
+        ui.label(str(d) + ('' if converted else '  (not converted)')).classes('text-xs text-grey-7 font-mono')
+        obs = details.get(row['set_id'], [])
+        if obs:
+            keys = list(obs[0])
+            cols = [{'name': k, 'label': k, 'field': k, 'align': 'left', 'sortable': True} for k in keys]
+            fmt = lambda k, v: '' if v is None else str(v)[:19].replace('T', ' ') if k == 'UTC Start' else str(v)  # noqa: E731
+            data = [{k: fmt(k, o[k]) for k in keys} for o in obs]
+            ui.table(columns=cols, rows=data).props('dense flat').classes('w-full')
+
+    @ui.refreshable
+    def jobs():
+        live = [r for r in TOOL_RUNS.values() if r.live]
+        done = sorted((r for r in TOOL_RUNS.values() if not r.live), key=lambda r: r.finished or 0, reverse=True)
+        items = live + TOOL_QUEUE + done[:N_RECENT]
+        if not items:
+            ui.label('No conversions or database updates since the UI started.').classes('text-xs text-grey-7')
+        for r in items:
+            status, color = tool_status(r)
+            sel = 'skao-selected' if view['run'] is r else ''
+            with ui.row().classes(f'w-full items-center no-wrap gap-1 px-1 rounded {sel}'):
+                ui.label(tool_label(r)).classes('grow text-sm cursor-pointer').on('click', lambda r=r: show_job(r))
+                ui.badge(status, color=color).props('rounded')
+                if r.live or r.finished:
+                    ui.label(r.elapsed).classes('text-xs text-grey-7')
+                if r.live:
+                    ui.button(icon='stop', color='negative', on_click=lambda r=r: cancel_run(r)).props(
+                        'flat dense size=sm'
+                    ).tooltip('Cancel')
+                elif r in TOOL_QUEUE:
+                    ui.button(
+                        icon='delete', color='negative', on_click=lambda r=r: (TOOL_QUEUE.remove(r), refresh_rows())
+                    ).props('flat dense size=sm').tooltip('Remove from the queue')
+
+    def tick():
+        refresh_rows()
+        state = (tuple(map(id, TOOL_QUEUE)), tuple((id(r), r.status) for r in TOOL_RUNS.values()))
+        if state != view['jobs']:
+            view['jobs'] = state
+            jobs.refresh()
+        r = view['run']
+        if r is None:
+            return
+        for line in r.lines[view['n'] :]:
+            log.push(line)
+        view['n'] = len(r.lines)
+        status, _ = tool_status(r)
+        took = f', {"running for" if r.live else "took"} {r.elapsed}' if r.elapsed else ''
+        job_title.set_text(f'{tool_label(r)}: {status}{took}')
+        cmd.set_text(r.command)
+        progress.set_text(r.progress)
+
+    ui.add_head_html(SETS_CSS)
+    with ui.header().classes('items-center gap-2'):
+        ui.button(icon='arrow_back', on_click=lambda: ui.navigate.to('../')).props('flat round color=white').tooltip(
+            'Back to the reports'
+        )
+        brand('SKA-Low UV reports')
+        ui.label('Calibration sets').classes('text-subtitle1 opacity-80')
+        ui.space()
+        reviewer_chip()
+
+    with ui.column().classes('w-full gap-3'):
+        with ui.row().classes('w-full items-center gap-2'):
+            search = (
+                ui.input(placeholder='Search all columns: a station, date, Night, FAILED...')
+                .props('dense outlined clearable')
+                .classes('w-96')
+            )
+            search.on_value_change(lambda e: grid.run_grid_method('setGridOption', 'quickFilterText', e.value or ''))
+            ui.button(
+                'Clear filters',
+                icon='filter_alt_off',
+                on_click=lambda: (search.set_value(''), grid.run_grid_method('setFilterModel', None)),
+            ).props('flat dense no-caps')
+            ui.button(
+                'CSV',
+                icon='download',
+                on_click=lambda: grid.run_grid_method('exportDataAsCsv', {'fileName': 'calibration_sets.csv'}),
+            ).props('flat dense no-caps').tooltip('Download the filtered rows')
+            ui.space()
+            updated = ui.label(workbook_text()).classes('text-xs text-grey-7')
+            with ui.button('Convert options', icon='tune').props('flat dense no-caps'):
+                with ui.menu().classes('p-3 w-96'), ui.column().classes('w-full gap-1'):
+                    ui.label('mccs-convert-set options').classes('eyebrow')
+                    ui.label("Used by every set's Convert button.").classes('text-xs text-grey-7')
+                    for f in fields:
+                        _field_widget(f, values)
+            with ui.button('Update database', icon='cloud_sync').props('unelevated dense no-caps'):
+                with ui.menu().classes('p-3 w-96') as db_menu, ui.column().classes('w-full gap-1'):
+                    ui.label('Update database').classes('eyebrow')
+                    ui.label(
+                        f'Runs mccs-spider on {STATE["daq_dir"]}, then mccs-analyse, rewriting {db}/latest.csv '
+                        'and calibration_sets.xlsx. The table reloads when it finishes.'
+                    ).classes('text-xs text-grey-7')
+                    ui.switch('Re-spider every folder (slow)').bind_value(spider, 'all')
+                    ui.switch('Upload to acacia (rclone)').bind_value(spider, 'upload')
+                    ui.button(
+                        'Update now', icon='play_arrow', on_click=lambda: (db_menu.close(), update_db())
+                    ).props('unelevated no-caps')
+        empty = ui.label(f'No {xlsx} yet: run Update database to build it.').classes('text-orange-9')
+        empty.set_visibility(not rows)
+        grid = ui.aggrid(
+            {
+                'columnDefs': set_columns(),
+                'rowData': rows,
+                'defaultColDef': {
+                    'sortable': True,
+                    'resizable': True,
+                    'filter': 'agTextColumnFilter',
+                    'floatingFilter': True,
+                    'suppressHeaderMenuButton': True,
+                },
+                ':getRowId': 'p => String(p.data.set_id)',
+                ':rowClassRules': "{'sets-failed': p => p.data.status === 'FAILED'}",
+                'rowSelection': {'mode': 'singleRow', 'checkboxes': False, 'enableClickSelection': True},
+                'pagination': True,
+                'paginationPageSize': 50,
+                'paginationPageSizeSelector': [25, 50, 100, 500],
+                'tooltipShowDelay': 300,
+                'animateRows': False,
+            },
+            auto_size_columns=False,
+        ).classes('sets-grid w-full').style('height: 62vh')
+        grid.on('cellClicked', on_cell)
+
+        with ui.row().classes('w-full no-wrap items-start gap-3'):
+            with ui.card().props('flat bordered').classes('w-1/2'):
+                selected()
+            with ui.card().props('flat bordered').classes('w-1/2'):
+                ui.label('Jobs').classes('eyebrow')
+                ui.label('Conversions and database updates run one at a time, alongside the reports.').classes(
+                    'text-xs text-grey-7'
+                )
+                jobs()
+                job_title = ui.label('No job selected').classes('text-subtitle1 mt-2')
+                with ui.row().classes('w-full items-center no-wrap'):
+                    cmd = ui.label().classes('font-mono text-xs break-all grow')
+                    ui.button(icon='content_copy', on_click=lambda: ui.clipboard.write(cmd.text)).props(
+                        'flat dense'
+                    ).tooltip('Copy command')
+                progress = ui.label().classes('font-mono text-xs')
+                log = ui.log(max_lines=10000).classes('w-full h-[40vh]')
+    ui.timer(1.0, tick)
+    ui.timer(5.0, reload_if_new)
+
+
 app.on_startup(preload_parsers)
 
 
 @app.on_shutdown
 def _stop_live():
-    for r in RUNS.values():
+    for r in [*RUNS.values(), *TOOL_RUNS.values()]:
         if r.live:
             _kill_group(r, signal.SIGKILL)
 
 
 def main():
     cli = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    cli.add_argument('--root', type=Path, default=DEFAULT_ROOT, help='Folder of calibration sets to start in')
+    cli.add_argument(
+        '--root', type=Path, default=DEFAULT_ROOT, help='Folder of calibration sets to start in, and convert sets to'
+    )
     cli.add_argument('--port', type=int, default=8080)
+    cli.add_argument(
+        '--db', type=Path, default=Path('db'), help='Database folder: latest.csv and calibration_sets.xlsx'
+    )
+    cli.add_argument('--daq-dir', type=Path, default=STATE['daq_dir'], help='Folder of the eb-* DAQ folders')
     opts = cli.parse_known_args()[0]
-    STATE['dir'] = opts.root.expanduser().resolve()
+    STATE['dir'] = STATE['root'] = opts.root.expanduser().resolve()
+    STATE['db'], STATE['daq_dir'] = opts.db.expanduser().resolve(), opts.daq_dir.expanduser()
     if hub := os.environ.get('JUPYTERHUB_SERVICE_PREFIX'):
         print(f'In JupyterHub, open {hub}proxy/{opts.port}/ (needs jupyter-server-proxy)', flush=True)
     # 127.0.0.1, as the default 0.0.0.0 would expose a no-login launcher of arbitrary report jobs
-    ui.run(host='127.0.0.1', port=opts.port, reload=False, show=False, title='SKA-Low UV reports')
+    # The secret only signs the cookie that keeps each browser's reviewer initials; it is not a login
+    secret = os.environ.get('MCCS_REPORT_UI_SECRET', 'mccs-report-ui')
+    ui.run(
+        host='127.0.0.1', port=opts.port, reload=False, show=False, title='SKA-Low UV reports', storage_secret=secret
+    )
 
 
 if __name__ in {'__main__', '__mp_main__'}:
