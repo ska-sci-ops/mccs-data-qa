@@ -37,6 +37,8 @@ from pathlib import Path
 from urllib.parse import quote
 
 import h5py
+import openpyxl  # noqa: F401  # import eagerly: pandas' lazy import from concurrent io_bound threads races ("partially initialized module")
+import pandas  # noqa: F401  # same reason
 import yaml
 from mccs_data_qa.reports.argparse_form import Field, build_argv, default_values, form_fields, missing_required
 from fastapi import HTTPException
