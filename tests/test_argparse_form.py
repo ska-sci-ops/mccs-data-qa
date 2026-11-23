@@ -495,3 +495,57 @@ def test_report_ui_import_cal(tmp_path, monkeypatch):
     assert report_ui.cal_runs(a) == [dest]
     assert 'url=run1_from_set2/index.html' in (dest.parent / 'index.html').read_text()
     assert report_ui.importable_sets(b) == {str(a): ['run1_from_set2']}
+
+
+def test_report_ui_run_now(tmp_path, monkeypatch):
+    """Run now starts a queued job alongside the running one, unless it waits for or clashes with it."""
+    pytest.importorskip('nicegui')
+    from mccs_data_qa.reports import report_ui
+
+    def fake_start(job):
+        r = report_ui.Run(job.dir, report_ui.SCRIPTS[job.name], job.argv, 0, live=True)
+        report_ui.RUNS[r.dir] = r
+        return r
+
+    monkeypatch.setattr(report_ui, 'RUNS', {})
+    monkeypatch.setattr(report_ui, 'QUEUE', [])
+    monkeypatch.setattr(report_ui, 'start_run', fake_start)
+    a = tmp_path / 'a'
+    run1 = report_ui.report_dir(a, 'calibration') / 'run1'
+    report_ui.enqueue(a, 'calibration', [], run1)
+    report_ui.enqueue(a, 'delay_fit', [], caldirs=[run1])
+    report_ui.enqueue(a, 'calibration', [], run1)  # Re-run of the running folder
+    ql = report_ui.Job(a, 'quicklook', [], 0, report_ui.run_dir(a, 'quicklook'))
+    report_ui.QUEUE.append(ql)
+    fit, rerun = report_ui.QUEUE[:2]
+
+    report_ui.move_job(ql, -len(report_ui.QUEUE))
+    assert report_ui.QUEUE[0] is ql
+    assert report_ui.run_now_blocked(fit) == 'Waits for calibration'
+    assert report_ui.run_now_blocked(rerun) == 'A running report uses its folders'
+    report_ui.run_now(fit)
+    report_ui.run_now(rerun)
+    assert report_ui.QUEUE == [ql, fit, rerun]
+    report_ui.run_now(ql)
+    assert report_ui.QUEUE == [fit, rerun]
+    assert sum(r.live for r in report_ui.RUNS.values()) == 2
+
+
+def test_report_ui_run_tool_now(tmp_path, monkeypatch):
+    """Run now starts a queued convert while another runs; the queue starts nothing until both finish."""
+    pytest.importorskip('nicegui')
+    from mccs_data_qa.reports import report_ui
+
+    monkeypatch.setattr(report_ui, 'TOOL_RUNS', {})
+    monkeypatch.setattr(report_ui, 'TOOL_QUEUE', [])
+    monkeypatch.setattr(report_ui.background_tasks, 'create', lambda coro: coro.close())
+    a, b, c = (report_ui.enqueue_tool(tmp_path / n, 'x.y', []) for n in 'abc')
+    assert a.live and report_ui.TOOL_QUEUE == [b, c]
+    report_ui.run_tool_now(c)
+    assert c.live and report_ui.TOOL_QUEUE == [b]
+    a.live = False
+    report_ui.start_tool()
+    assert not b.live  # c still runs
+    c.live = False
+    report_ui.start_tool()
+    assert b.live

@@ -656,12 +656,19 @@ def run_for(d: Path, name: str) -> Run | None:
 def start_tool():
     """Start the first queued convert / database-update job, if none is running."""
     if TOOL_QUEUE and not any(r.live for r in TOOL_RUNS.values()):
-        r = TOOL_QUEUE.pop(0)
-        r.started, r.live = time.time(), True
-        r.dir.mkdir(parents=True, exist_ok=True)
-        r.save()
-        TOOL_RUNS[r.dir] = r
-        background_tasks.create(_execute(r, start_tool))
+        run_tool_now(TOOL_QUEUE[0])
+
+
+def run_tool_now(r: Run):
+    """Start a queued convert / database-update job, alongside any running; the queue waits for all to finish."""
+    if r not in TOOL_QUEUE:
+        return
+    TOOL_QUEUE.remove(r)
+    r.started, r.live = time.time(), True
+    r.dir.mkdir(parents=True, exist_ok=True)
+    r.save()
+    TOOL_RUNS[r.dir] = r
+    background_tasks.create(_execute(r, start_tool))
 
 
 def enqueue_tool(d: Path, module: str, argv: list[str]) -> Run:
@@ -684,21 +691,43 @@ def _writes(job: Job) -> set[Path]:
     return {job.dir}
 
 
+def _reads(job: Job) -> set[Path]:
+    """Calibration run folders a job reads."""
+    # A delay fit run is read with the calibration run of the same name, see set_argv()
+    return set(job.caldirs) | {
+        report_dir(job.set, 'calibration') / d.name for d in job.caldirs if d.parent.name == 'delay_fit'
+    }
+
+
 def cal_ready(job: Job) -> bool:
     """Whether the calibration runs a job reads are done, and no queued job will rewrite them."""
     if job.name not in NEEDS_CAL:
         return True
-    # A delay fit run is read with the calibration run of the same name, see set_argv()
-    reads = set(job.caldirs) | {
-        report_dir(job.set, 'calibration') / d.name for d in job.caldirs if d.parent.name == 'delay_fit'
-    }
     pending = set().union(*map(_writes, QUEUE))
-    return bool(job.caldirs) and all(any(d.glob('*.cal')) for d in job.caldirs) and not reads & pending
+    return bool(job.caldirs) and all(any(d.glob('*.cal')) for d in job.caldirs) and not _reads(job) & pending
 
 
 def ready(job: Job) -> bool:
     """Whether a queued job can start now."""
     return running() is None and cal_ready(job)
+
+
+def run_now_blocked(job: Job) -> str:
+    """Why a queued job can't start alongside the running ones, or '' if it can."""
+    if not cal_ready(job):
+        return 'Waits for calibration'
+    live = {r.dir for r in RUNS.values() if r.live}
+    # A folder clashes if a live run writes it or a folder above it (e.g. delay_fit/ over delay_fit/<run>)
+    if any(p in live or live & set(p.parents) for p in _writes(job) | _reads(job)):
+        return 'A running report uses its folders'
+    return ''
+
+
+def run_now(job: Job):
+    """Start a queued job straight away, alongside any running; the queue waits for all of them to finish."""
+    if job in QUEUE and not run_now_blocked(job):
+        QUEUE.remove(job)
+        start_run(job)
 
 
 def start_queued():
@@ -1500,6 +1529,13 @@ def index():
                         extra += f', cal {" ".join(d.name for d in job.caldirs)}'
                     wait = ', waits for calibration' if not cal_ready(job) else ''
                     ui.label(f'{extra}{wait}').classes('text-xs text-grey-7 font-mono break-all')
+                blocked = run_now_blocked(job)
+                ui.button(icon='play_arrow', color='positive', on_click=lambda job=job: run_now(job)).props(
+                    'flat dense'
+                ).tooltip(blocked or 'Run now, alongside the running report').set_enabled(not blocked)
+                ui.button(
+                    icon='vertical_align_top', on_click=lambda job=job: move_job(job, -len(QUEUE))
+                ).props('flat dense').tooltip('Move to top')
                 ui.button(icon='arrow_upward', on_click=lambda job=job: move_job(job, -1)).props('flat dense')
                 ui.button(icon='arrow_downward', on_click=lambda job=job: move_job(job, 1)).props('flat dense')
                 ui.button(icon='delete', color='negative', on_click=lambda job=job: remove_job(job)).props(
@@ -1913,9 +1949,9 @@ async def sets_page():
     """Calibration sets: a grid of calibration_sets.xlsx with a Convert button per set, and the database update."""
     root, db = STATE['root'], STATE['db']
     xlsx = db / 'calibration_sets.xlsx'
-    rows, details = await run.io_bound(load_sets, xlsx, root)
-    by_id = {r['set_id']: r for r in rows}
-    view = {'set': None, 'run': None, 'n': 0, 'mtime': xlsx.stat().st_mtime if xlsx.exists() else None, 'jobs': None}
+    # Filled by reload_if_new() once the page is sent: reading the workbook can outlast the page's 3 s response_timeout
+    rows, details, by_id = [], {}, {}
+    view = {'set': None, 'run': None, 'n': 0, 'mtime': None, 'jobs': None}
     if PARSERS.get(CONVERT) is None:
         from mccs_data_qa.convert_set import build_parser
 
@@ -1926,10 +1962,6 @@ async def sets_page():
 
     def existing() -> set[str]:
         return {p.name for p in root.iterdir()} if root.is_dir() else set()
-
-    names = existing()
-    for r in rows:
-        r.update(set_row_state(r, names))
 
     def refresh_rows():
         """Push the rows whose action, QA or reports changed, keeping the grid's filters, sort and scroll."""
@@ -1950,6 +1982,7 @@ async def sets_page():
         mtime = xlsx.stat().st_mtime if xlsx.exists() else None
         if mtime == view['mtime']:
             return
+        first = view['mtime'] is None
         view['mtime'] = mtime
         new, det = await run.io_bound(load_sets, xlsx, root)
         rows[:] = new
@@ -1963,7 +1996,8 @@ async def sets_page():
         updated.set_text(workbook_text())
         empty.set_visibility(not rows)
         refresh_rows()
-        ui.notify(f'Reloaded {len(rows)} calibration sets')
+        if not first:
+            ui.notify(f'Reloaded {len(rows)} calibration sets')
 
     def workbook_text() -> str:
         return f'{xlsx.name}, updated {ago(view["mtime"])}' if view['mtime'] else f'No {xlsx}'
@@ -2091,6 +2125,14 @@ async def sets_page():
                     ).tooltip('Cancel')
                 elif r in TOOL_QUEUE:
                     ui.button(
+                        icon='play_arrow', color='positive', on_click=lambda r=r: (run_tool_now(r), refresh_rows())
+                    ).props('flat dense size=sm').tooltip('Run now, alongside the running job')
+                    ui.button(
+                        icon='vertical_align_top',
+                        on_click=lambda r=r: r in TOOL_QUEUE
+                        and (TOOL_QUEUE.remove(r), TOOL_QUEUE.insert(0, r), refresh_rows()),
+                    ).props('flat dense size=sm').tooltip('Move to top')
+                    ui.button(
                         icon='delete', color='negative', on_click=lambda r=r: (TOOL_QUEUE.remove(r), refresh_rows())
                     ).props('flat dense size=sm').tooltip('Remove from the queue')
 
@@ -2169,7 +2211,7 @@ async def sets_page():
                         'Update now', icon='play_arrow', on_click=lambda: (db_menu.close(), update_db())
                     ).props('unelevated no-caps')
         empty = ui.label(f'No {xlsx} yet: run Update database to build it.').classes('text-orange-9')
-        empty.set_visibility(not rows)
+        empty.set_visibility(not xlsx.exists())
         grid = ui.aggrid(
             {
                 'columnDefs': set_columns(),
@@ -2213,6 +2255,8 @@ async def sets_page():
                 log = ui.log(max_lines=10000).classes('w-full h-[40vh]')
     ui.timer(1.0, tick)
     ui.timer(5.0, reload_if_new)
+    await ui.context.client.connected()
+    await reload_if_new()
 
 
 app.on_startup(preload_parsers)
