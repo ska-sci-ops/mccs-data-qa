@@ -9,15 +9,23 @@ import pandas as pd
 import yaml
 
 
+def parse_n_expected(n_expected):
+    """ '321,385' (or an int, or None) -> list of allowed file counts; empty means don't check. """
+    if n_expected in (None, ''):
+        return []
+    return [int(x) for x in str(n_expected).split(',') if x.strip()]
+
+
 def get_eb(daq_dir, eb_id, n_expected):
-    """ Returns the path to the directory for a given eb_id. """
+    """ Returns the path to the directory for a given eb_id; n_expected is a count or comma-separated counts. """
     dirpath = glob.glob(f"{daq_dir}/{eb_id}/ska-low-mccs/*")[0]
     # some EBs keep the files in a correlator_data subdirectory
     if os.path.isdir(f"{dirpath}/correlator_data"):
         dirpath = f"{dirpath}/correlator_data"
     n_files = len(glob.glob(f"{dirpath}/correlation*.hdf5"))
-    if n_expected and n_files != n_expected:
-        raise RuntimeError(f"Wrong number of files: {n_files} / {n_expected}")
+    allowed = parse_n_expected(n_expected)
+    if allowed and n_files not in allowed:
+        raise RuntimeError(f"Wrong number of files: {n_files} / {','.join(map(str, allowed))}")
     return dirpath
 
 
@@ -56,7 +64,7 @@ def main_eb():
     p.add_argument('eb', help="EB directory (e.g. daq-data/eb-...) or EB ID")
     p.add_argument('--daq-dir', default='/home/jovyan/daq-data', help="where to look up a bare EB ID")
     p.add_argument('--out-dir', default='.')
-    p.add_argument('--n-expected', type=int, default=None, help="fail unless the EB has this many correlation files")
+    p.add_argument('--n-expected', default=None, help="fail unless the EB has this many correlation files (comma-separated list allowed)")
     add_quantise_arg(p)
     a = p.parse_args()
 
@@ -78,7 +86,7 @@ def build_parser():
     p.add_argument('--xlsx', default='db/calibration_sets.xlsx')
     p.add_argument('--daq-dir', default='/home/jovyan/daq-data')
     p.add_argument('--out-dir', default='sweeps')
-    p.add_argument('--n-expected', type=int, default=385, help="expected correlation files per EB")
+    p.add_argument('--n-expected', default='321,385', help="expected correlation files per EB (comma-separated list allowed)")
     p.add_argument('--include-failed', action='store_true', help="also convert observations flagged FAILED")
     p.add_argument('--list', action='store_true', help="show the set's observations and exit")
     add_quantise_arg(p)

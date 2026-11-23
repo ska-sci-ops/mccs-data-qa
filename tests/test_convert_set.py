@@ -45,8 +45,17 @@ def test_sets_page_reads_analyse_workbook(tmp_path):
 def test_convert_form_is_lossless_unless_switched():
     fields = [f for f in form_fields(build_parser()) if f.dest not in CONVERT_SET_ARGS]
     assert {f.dest for f in fields} == {'n_expected', 'include_failed'}
-    values = {'n_expected': 385, 'include_failed': False, 'lossy': False, 'step': 0}
+    values = {'n_expected': '321,385', 'include_failed': False, 'lossy': False, 'step': 0}
     assert convert_argv(fields, values) == []  # A stray step never turns on lossy
     assert convert_argv(fields, values | {'lossy': True}) == ['--lossy=0.5']
     argv = convert_argv(fields, values | {'lossy': True, 'step': 0.25})
     assert build_parser().parse_args(['1', *argv]).quantise == 0.25
+
+
+def test_n_expected_accepts_comma_separated_list():
+    from mccs_data_qa.convert_set import parse_n_expected
+
+    assert parse_n_expected('321,385') == [321, 385]
+    assert parse_n_expected(385) == [385]
+    assert parse_n_expected(None) == parse_n_expected('') == []
+    assert build_parser().parse_args(['1']).n_expected == '321,385'
