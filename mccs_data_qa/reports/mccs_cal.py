@@ -11,6 +11,7 @@ import os
 import warnings
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pandas as pd
 from ska_ost_low_uv.datamodel.cal import UVXAntennaCal, create_uvx_antenna_cal
@@ -54,6 +55,22 @@ def eep_kwargs(mccs_eep: str = 'regular') -> dict:
         return {'eep_path': os.environ[EEP_DIR_ENV], 'eep_filebase': MCCS_EEPS[mccs_eep], 'eep_suffix': '.h5'}
     env = {k: os.environ.get(k, EEP_DEFAULTS.get(k, '')) for k in ('EEP_PATH', 'EEP_FILE_NAME', 'EEP_SUFFIX')}
     return {'eep_path': env['EEP_PATH'], 'eep_filebase': env['EEP_FILE_NAME'], 'eep_suffix': env['EEP_SUFFIX']}
+
+
+def eep_missing(f_mhz, mccs_eep: str = 'regular', max_offset_mhz: float = 3.0) -> np.ndarray:
+    """Bool (N_freq): channels with no EEP within max_offset_mhz in a compressed --mccs-eep file.
+
+    The solver's load_eeps() raises for these, at its default 3 MHz limit, e.g. 247.5-277 MHz in ska_low_feko.h5.
+    ponytail: regular (npz) EEPs are taken to cover the band; check their frequencies too if they ever have gaps.
+    """
+    f_mhz = np.atleast_1d(np.asarray(f_mhz, dtype=float))
+    if not MCCS_EEPS.get(mccs_eep):
+        return np.zeros(len(f_mhz), dtype=bool)
+    kw = eep_kwargs(mccs_eep)
+    with h5py.File(os.path.join(kw['eep_path'], kw['eep_filebase'] + '.h5'), 'r') as h5:
+        # As load_eeps_h5(): ska-ost-low-uv >= 0.5.0 files hold frequencies in Hz, older ones in MHz
+        freqs = h5['coords/frequency'][:] / 1e6 if 'alm' in h5 else h5['frequency'][:]
+    return np.abs(f_mhz[:, None] - freqs[None, :]).min(axis=1) > max_offset_mhz
 
 
 def mccs_cal_problem(cal_model: str, mccs_eep: str = 'regular') -> str:

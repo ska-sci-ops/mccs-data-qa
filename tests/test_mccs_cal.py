@@ -67,3 +67,17 @@ def test_eep_kwargs_regular_and_compressed(tmp_path, monkeypatch):
     assert mccs_cal.eep_kwargs('regular')['eep_suffix'] == '.npz'
     assert mccs_cal.mccs_cal_problem('mccs-gsm', 'compressed-harp') == ''
     assert 'POSTX_EEP_DIR' in mccs_cal.mccs_cal_problem('mccs-gsm', 'compressed-feko')
+
+
+def test_eep_missing_flags_channels_far_from_any_eep(tmp_path, monkeypatch):
+    # A gap like ska_low_feko.h5's 244.53-280 MHz; frequencies in Hz as in ska-ost-low-uv >= 0.5.0 files
+    import h5py
+
+    with h5py.File(tmp_path / 'ska_low_feko.h5', 'w') as h5:
+        h5['alm'] = np.zeros((3, 1, 1), 'int32')
+        h5['coords/frequency'] = np.array([241.40625, 244.53125, 280.0]) * 1e6
+    monkeypatch.setenv('POSTX_EEP_DIR', str(tmp_path))
+    monkeypatch.setattr(mccs_cal, 'MCCS_EEPS', mccs_cal._mccs_eeps())
+    f = [244.5, 247.5, 262.0, 276.5, 277.5]
+    assert mccs_cal.eep_missing(f, 'compressed-feko').tolist() == [False, False, True, True, False]
+    assert not mccs_cal.eep_missing(f, 'regular').any()

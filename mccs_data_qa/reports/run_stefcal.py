@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pylab as plt
 from loguru import logger
+from mccs_data_qa.reports.mccs_cal import MCCS_CAL, eep_missing
 from mccs_data_qa.reports.report import (
     AA1_GRID,
     AA1_GRID_COLS,
@@ -51,9 +52,17 @@ from ska_ost_low_uv.io import read_cal, write_cal
 from ska_ost_low_uv.parallelize import run_in_parallel, task
 from ska_ost_low_uv.postx import ApertureArray
 from ska_ost_low_uv.postx.calibration.suncal import merge_suncal_provenance
-from ska_ost_low_uv.postx.channel_utils import iterate_channels_cal
+from ska_ost_low_uv.postx.channel_utils import _flagged_channels, iterate_channels_cal
 
 ANT_FLAG_FRACTION = 0.5  # An antenna is flagged if zeroed in more than this fraction of unflagged channels
+
+
+def _per_channel(values: list, solved: np.ndarray) -> np.ndarray:
+    """Per-channel results of the solved channels as an (N_freq, ...) array, NaN on the skipped channels."""
+    v = np.asarray(values, dtype=float)
+    out = np.full((len(solved),) + v.shape[1:], np.nan)
+    out[solved] = v
+    return out
 
 
 def _calibrate_sweep(
@@ -124,12 +133,31 @@ def _calibrate_sweep(
             dgs.append(dg)
             return cal
 
-        logger.info(f'{aa.name}: {cal_model} model, leakage {leakage}, {beam} on {len(aa.f)} channels')
+        # MCCS models take their EEPs from --mccs-eep (SUN_FAST none); --beam only applies to the stefcal models
+        if cal_model not in MCCS_CAL:
+            patterns = beam
+        elif MCCS_CAL[cal_model].get('ignore_eeps'):
+            patterns = 'no EEPs'
+        else:
+            patterns = f'{mccs_eep} EEPs'
+        logger.info(f'{aa.name}: {cal_model} model, leakage {leakage}, {patterns} on {len(aa.f)} channels')
+        if cal_model in MCCS_CAL and not MCCS_CAL[cal_model].get('ignore_eeps'):
+            # The solver raises on channels with no EEP within 3 MHz: skip them, so they are zeroed and flagged
+            no_eep = eep_missing(aa.f.to_value('MHz'), mccs_eep)
+            if no_eep.any():
+                f_no = aa.f.to_value('MHz')[no_eep]
+                logger.warning(
+                    f'{aa.name}: no {mccs_eep} EEP within 3 MHz of {no_eep.sum()} channels '
+                    f'({f_no.min():.1f}-{f_no.max():.1f} MHz), flagged'
+                )
+                fl = aa.calibration.flagging
+                fl.channel_flags = no_eep if fl.channel_flags is None else fl.channel_flags | no_eep
+        solved = ~_flagged_channels(aa)  # The channels iterate_channels_cal() solves, so dgs and mccs entries
         cal = iterate_channels_cal(aa, 'all', cal_channel)
-        cal.provenance['sweep'] = {'dG': np.array(dgs)}
+        cal.provenance['sweep'] = {'dG': _per_channel(dgs, solved)}
         if mccs:
-            # MCCS solver info per channel, as (N_freq, ...) arrays
-            cal.provenance['mccs'] = {k: np.array([m[k] for m in mccs]) for k in mccs[0]}
+            # MCCS solver info per channel, as (N_freq, ...) arrays, NaN on skipped channels
+            cal.provenance['mccs'] = {k: _per_channel([m[k] for m in mccs], solved) for k in mccs[0]}
         if suns:
             cal.provenance['suncal'] = merge_suncal_provenance(suns)
             # Channels where suncal kept the Sun-only gains (1 Jy Sun) are not in Jy, so are flagged
