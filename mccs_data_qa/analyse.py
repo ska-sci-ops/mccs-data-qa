@@ -65,6 +65,14 @@ def hour_hist(df: pd.DataFrame, col: str) -> pd.DataFrame:
     return h.rename_axis(col.replace(' Bin', ''))
 
 
+def set_id(date, lst) -> int:
+    """ Stable Set ID from a set's grouping key: yyyymmdd * 1000 + LST in 0.1 hr (2026-09-15, 14.4 -> 20260915144).
+
+    Derived from the set itself, not its position, so adding or deleting other data never renumbers a set.
+    """
+    return int(pd.Timestamp(date).strftime('%Y%m%d')) * 1000 + round(float(lst) * 10)
+
+
 def calibration_sets(df: pd.DataFrame):
     """ Group correlator sweeps taken on the same UTC day at the same LST (0.1 hr, as in the CSV).
 
@@ -84,7 +92,7 @@ def calibration_sets(df: pd.DataFrame):
     keys = ['Date (UTC)', 'LST (hr)']
     sw['n_in_set'] = sw.groupby(keys)['Observation ID'].transform('size')
     sw = sw[sw['n_in_set'] >= 2].sort_values(keys + ['Station ID'])
-    sw['Set ID'] = sw.groupby(keys, sort=False).ngroup() + 1
+    sw['Set ID'] = [set_id(d, l) for d, l in zip(sw['Date (UTC)'], sw['LST (hr)'])]
     sw['Status'] = sw['Failed'].map({True: 'FAILED', False: 'OK'})
 
     sw['failed_station'] = sw['Station ID'].where(sw['Failed'], '').replace('', pd.NA)

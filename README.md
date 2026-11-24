@@ -57,7 +57,14 @@ then open **Calibration sets** in the header. It lists every set in `db/calibrat
 per-column filters, a search box, CSV export, the set QA marked in the report UI, and a Convert button per
 row. Conversions go into `--root` with the Convert options. **Update database** runs `mccs-spider --analyse`
 (spider, then `mccs-analyse`, then the acacia upload, which a switch can turn off) and reloads the table.
-These jobs run one at a time, alongside the reports. QA marks record the reviewer's initials, set from the
+These jobs run one at a time, alongside the reports.
+
+A Set ID is the set's UTC date and LST, `yyyymmdd` then LST in 0.1 hr (2026-09-15 at LST 14.4 is
+`20260915144`), so deleting or adding data never renumbers other sets. Folders converted under the old
+sequential IDs (`set12_...`) are renamed once with `python -m mccs_data_qa.migrate_set_ids --sweeps-dir sweeps --dry-run`
+(drop `--dry-run` to apply), then rerun `mccs-analyse`.
+
+QA marks record the reviewer's initials, set from the
 header chip and kept per browser.
 
 On the MCCS JupyterHub, start the UI from a hub terminal and open it through jupyter-server-proxy,
