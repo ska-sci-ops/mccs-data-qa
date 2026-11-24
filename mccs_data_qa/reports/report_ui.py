@@ -1410,7 +1410,7 @@ def index():
         s = STATE['set']
         fields, values = form_state(script)
         values = dict(values)  # The options as they are now
-        argv = build_argv(fields, values)
+        argv = script_argv(fields, values)
         sel = cards[name]['cal']
         cal_names = [] if sel is None or not sel.value else sel.value if sel.multiple else [sel.value]
         sets = sorted(
@@ -1656,7 +1656,7 @@ def index():
         if (d / 'index.html').exists() and not await confirm_rerun(s, name, d):
             return
         fields, values = form_state(script)
-        r = enqueue(s, name, build_argv(fields, values), d, picked_cals(s, cards[name]['cal']))
+        r = enqueue(s, name, script_argv(fields, values), d, picked_cals(s, cards[name]['cal']))
         if r:
             show(r)
         else:
@@ -2106,6 +2106,13 @@ def set_row_state(row: dict, existing: set[str]) -> dict:
         st['qa_tip'] = tip or 'Not reviewed yet: click to open the set and mark it'
         st['reports'] = [n for n in SCRIPTS if (run_dir(d, n) / 'index.html').exists()]
     return st
+
+
+def script_argv(fields: list[Field], values: dict) -> list[str]:
+    """`build_argv()`, leaving out the options hidden for the --cal-model (e.g. --beam for mccs-*)."""
+    model = values.get('cal_model')
+    hidden = {d for d, models in CAL_MODEL_ONLY.items() if model and model not in models}
+    return build_argv(fields, {f.dest: f.default if f.dest in hidden else values[f.dest] for f in fields})
 
 
 def convert_argv(fields: list[Field], values: dict) -> list[str]:

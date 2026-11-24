@@ -22,18 +22,18 @@ dependencies = [
 [project.optional-dependencies]
 app = ["panel", "bokeh"]
 notebook = ["ipywidgets"]
-# ska-ost-low-uv needs python 3.11+; the base install stays light for the MCCS host
+# ska-ost-low-uv needs python 3.12+; the base install stays light for the MCCS host
 reports = [
-    "ska-ost-low-uv[postx] @ git+https://gitlab.com/ska-telescope/ost/ska-ost-low-uv.git@main ; python_version >= '3.11'",
+    "ska-ost-low-uv[postx] @ git+https://gitlab.com/ska-telescope/ost/ska-ost-low-uv.git@main ; python_version >= '3.12'",
     # MCCS station calibration solver (SFT GSM/SUN/SUN_FAST); its ska-sdp-* deps are on the SKAO index below
-    "ska-low-mccs-calibration @ git+https://gitlab.com/dancpr/ska-low-mccs-calibration.git@eep-spherical-harmonics ; python_version >= '3.11'",
+    "ska-low-mccs-calibration @ git+https://gitlab.com/dancpr/ska-low-mccs-calibration.git@eep-spherical-harmonics ; python_version >= '3.12'",
     # Fixed and faster solvers, incl. the jones_substitution polarised solve (--leakage solve)
-    "ska-sdp-func-python @ git+https://gitlab.com/dancpr/ska-sdp-func-python.git@aiv-000-solver-fix-and-optimise ; python_version >= '3.11'",
-    "nicegui>=3 ; python_version >= '3.11'",
-    "fastapi ; python_version >= '3.11'",
-    "jinja2>=3.1 ; python_version >= '3.11'",
-    "hickle>=5 ; python_version >= '3.11'",
-    "matplotlib ; python_version >= '3.11'",
+    "ska-sdp-func-python @ git+https://gitlab.com/dancpr/ska-sdp-func-python.git@aiv-000-solver-fix-and-optimise ; python_version >= '3.12'",
+    "nicegui>=3 ; python_version >= '3.12'",
+    "fastapi ; python_version >= '3.12'",
+    "jinja2>=3.1 ; python_version >= '3.12'",
+    "hickle>=5 ; python_version >= '3.12'",
+    "matplotlib ; python_version >= '3.12'",
     "psutil>=7.2.2",
 ]
 

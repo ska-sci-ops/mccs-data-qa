@@ -549,3 +549,21 @@ def test_report_ui_run_tool_now(tmp_path, monkeypatch):
     c.live = False
     report_ui.start_tool()
     assert b.live
+
+
+def test_script_argv_drops_hidden_cal_options():
+    """Options hidden for the --cal-model are not passed, so --beam and --mccs-eep never appear together."""
+    pytest.importorskip('nicegui')
+    from mccs_data_qa.reports import report_ui
+    from mccs_data_qa.reports.run_stefcal import build_parser
+
+    fields = form_fields(build_parser())
+    values = default_values(fields)
+    beam = next(f for f in fields if f.dest == 'beam')
+    other = next(c for c in beam.choices if c != beam.default)
+    values |= {'beam': other, 'nside': 64, 'sigma_thr': 3.5}
+    argv = report_ui.script_argv(fields, values)
+    assert f'--beam={other}' in argv and not any(a.startswith('--mccs-eep') for a in argv)
+    argv = report_ui.script_argv(fields, values | {'cal_model': 'mccs-sunfast'})
+    assert not any(a.startswith(('--beam', '--nside', '--sigma-thr')) for a in argv)
+    assert '--nside=64' in report_ui.script_argv(fields, values | {'cal_model': 'mccs-gsm'})

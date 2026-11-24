@@ -34,7 +34,7 @@ Sweeps are QA'd on file count: 385 (64-448), or the daytime ranges 321 (128-448)
 
 ### Reports
 
-The reports need the `reports` extra (python 3.11+, pulls ska-ost-low-uv from GitLab):
+The reports need the `reports` extra (python 3.12+, pulls ska-ost-low-uv from GitLab):
 
 ```
 uv pip install '.[reports]'
