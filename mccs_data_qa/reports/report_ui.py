@@ -21,6 +21,7 @@ In JupyterHub (needs jupyter-server-proxy), open <hub>/user/<name>/proxy/8080/ i
 import argparse
 import asyncio
 import codecs
+import contextlib
 import functools
 import importlib
 import json
@@ -39,6 +40,7 @@ from urllib.parse import quote
 import h5py
 import openpyxl  # noqa: F401  # import eagerly: pandas' lazy import from concurrent io_bound threads races ("partially initialized module")
 import pandas  # noqa: F401  # same reason
+import psutil
 import yaml
 from mccs_data_qa.reports.argparse_form import Field, build_argv, default_values, form_fields, missing_required
 from fastapi import HTTPException
@@ -173,6 +175,8 @@ class Run:
     cancelled: bool = False
     finished: float | None = None
     proc: asyncio.subprocess.Process | None = None
+    rss: int = 0  # Memory of the script and the processes it started, bytes, while running
+    peak_rss: int = 0
 
     @property
     def status(self) -> str:
@@ -214,6 +218,7 @@ class Run:
             'returncode': self.returncode,
             'cancelled': self.cancelled,
             'finished': self.finished,
+            'peak_rss': self.peak_rss,
         }
         (self.dir / 'run.json').write_text(json.dumps(meta))
 
@@ -235,6 +240,7 @@ class Run:
                 returncode=meta['returncode'],
                 cancelled=meta.get('cancelled', False),
                 finished=meta.get('finished'),
+                peak_rss=meta.get('peak_rss', 0),
             )
         except (OSError, ValueError, KeyError) as err:
             logger.warning(f'Cannot read {path / "run.json"}: {err!r}')
@@ -593,12 +599,60 @@ async def _pump(r: Run, stream: asyncio.StreamReader, log):
     r.progress = ''
 
 
+def gib(n: int) -> str:
+    """Bytes as GiB, e.g. '12.3 GiB'."""
+    return f'{n / 2**30:.1f} GiB'
+
+
+def tree_rss(pid: int) -> int:
+    """Resident memory of a process and all its descendants (e.g. loky workers), bytes; 0 if it has gone.
+
+    Pages shared between processes count once per process, so this overstates a little.
+    """
+    try:
+        root = psutil.Process(pid)
+        procs = [root, *root.children(recursive=True)]
+    except psutil.Error:
+        return 0
+    total = 0
+    for proc in procs:
+        with contextlib.suppress(psutil.Error):  # Exited since listed
+            total += proc.memory_info().rss
+    return total
+
+
+def memory_use() -> tuple[int, int]:
+    """(used, limit) memory in bytes: of this container if it has a cgroup v2 limit (as in JupyterHub, where
+    the machine's figures are the host's), else of the machine."""
+    # ponytail: cgroup v2 only; v1 (memory/memory.limit_in_bytes) falls back to the machine's figures
+    cg = Path('/sys/fs/cgroup')
+    try:
+        limit = (cg / 'memory.max').read_text().strip()
+        if limit != 'max':
+            stat = dict(line.split() for line in (cg / 'memory.stat').read_text().splitlines())
+            # The working set, as kubectl top reports: page cache that can be dropped doesn't count
+            return int((cg / 'memory.current').read_text()) - int(stat.get('inactive_file', 0)), int(limit)
+    except (OSError, ValueError):
+        pass
+    vm = psutil.virtual_memory()
+    return vm.total - vm.available, vm.total
+
+
+async def _sample_memory(r: Run, every: float = 2):
+    """Track a run's memory, and its peak, until cancelled."""
+    while True:
+        r.rss = tree_rss(r.proc.pid)
+        r.peak_rss = max(r.peak_rss, r.rss)
+        await asyncio.sleep(every)
+
+
 async def _execute(r: Run, then=None):
     """Run a script, streaming its output into the run, then start the next queued job (`then`, default
     `start_queued`)."""
     env = {**os.environ, 'MPLBACKEND': 'Agg', 'PYTHONUNBUFFERED': '1'}
     cmd = [sys.executable, '-m', r.module, *r.argv]
     shutdown = False
+    sampler = None
     try:
         with open(r.dir / 'run.log', 'w') as log:
             # Own session, so cancel also reaches the dask/loky workers the script starts
@@ -610,6 +664,7 @@ async def _execute(r: Run, then=None):
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )
+            sampler = asyncio.create_task(_sample_memory(r))
             await _pump(r, r.proc.stdout, log)
             r.returncode = await r.proc.wait()
     except asyncio.CancelledError:
@@ -617,8 +672,11 @@ async def _execute(r: Run, then=None):
         shutdown = True
         raise
     finally:
+        if sampler:
+            sampler.cancel()
         if r.returncode is None:
             _kill_group(r, signal.SIGKILL)
+        r.rss = 0
         r.finished = time.time()
         r.live = False
         r.save()
@@ -777,8 +835,30 @@ def picked_cals(setdir: Path, sel) -> list[Path]:
     """Calibration (or delay fit, 'delay_fit/<run>') run folders picked in a card's dropdown, or [] for none."""
     if sel is None or not sel.value:
         return []
-    names = sel.value if sel.multiple else [sel.value]
+    return cal_paths(setdir, sel.value if sel.multiple else [sel.value])
+
+
+def cal_paths(setdir: Path, names: list[str]) -> list[Path]:
+    """Calibration (or delay fit, 'delay_fit/<run>') run folders of these names in a set."""
     return [setdir / 'reports' / n if '/' in n else report_dir(setdir, 'calibration') / n for n in names]
+
+
+def batch_state(setdir: Path, name: str, values: dict, cal_names: list[str]) -> tuple[str, bool]:
+    """(why the report can't be queued on a set in a batch, or ''; whether it overwrites a report there).
+
+    A batch runs the same options, and reads calibration runs of the same names, on every set.
+    """
+    d = run_dir(setdir, name, values)
+    have = {x.name for x in cal_runs(setdir) + cal_runs_coming(setdir)}
+    have |= {f'delay_fit/{x.name}' for x in delay_fit_runs(setdir)} if name in DELAY_CAL else set()
+    missing = [n for n in cal_names if n not in have]
+    reason = (
+        unavailable(setdir, name, values)
+        or ('No calibration run picked.' if name in NEEDS_CAL and not cal_names else '')
+        or (f'No calibration run {", ".join(missing)}.' if missing else '')
+        or ('Already queued or running.' if queued(d) or (d in RUNS and RUNS[d].live) else '')
+    )
+    return reason, (d / 'index.html').exists()
 
 
 def delay_fit_runs(setdir: Path) -> list[Path]:
@@ -879,6 +959,12 @@ async def cancel_run(r: Run):
     except asyncio.TimeoutError:
         pass
     _kill_group(r, signal.SIGKILL)
+
+
+def set_text(label, text: str):
+    """Set a label's text, sending an update only if it changed (tick() runs every 0.3 s)."""
+    if label.text != text:
+        label.set_text(text)
 
 
 def _field_widget(f: Field, values: dict):
@@ -1181,6 +1267,11 @@ def index():
                         reason = ui.label().classes('text-xs text-orange-9')
                         with ui.row().classes('w-full justify-end'):
                             ui.button('Cancel', on_click=dlg.close).props('flat no-caps')
+                            batch_btn = ui.button(
+                                'Batch',
+                                icon='library_add',
+                                on_click=lambda dlg=dlg, name=name, script=script: batch_cal(dlg, name, script),
+                            ).props('flat no-caps').tooltip('Add this run to several sets')
                             run_btn = ui.button(
                                 on_click=lambda dlg=dlg, name=name, script=script: add_cal(dlg, name, script)
                             ).props('unelevated no-caps')
@@ -1224,6 +1315,11 @@ def index():
                             'flat dense no-caps color=grey-8'
                         )
                         ui.space()
+                        batch_btn = ui.button(
+                            'Batch',
+                            icon='library_add',
+                            on_click=lambda name=name, script=script: batch_dialog(name, script),
+                        ).props('flat dense no-caps').tooltip('Queue with these options on several sets')
                         run_btn = ui.button(
                             on_click=lambda name=name, script=script: on_run(name, script)
                         ).props('unelevated dense no-caps')
@@ -1244,6 +1340,7 @@ def index():
                     'summary': summary_btn,
                     'reason': reason,
                     'run': run_btn,
+                    'batch': batch_btn,
                     'report': report_btn,
                     'log': log_btn,
                     'opts': opts_btn,
@@ -1300,6 +1397,77 @@ def index():
     async def add_cal(dlg, name: str, script: str):
         dlg.close()
         await on_run(name, script)
+
+    async def batch_cal(dlg, name: str, script: str):
+        dlg.close()
+        await batch_dialog(name, script)
+
+    async def batch_dialog(name: str, script: str):
+        """Queue a report with the card's options, and calibration runs of the same names, on several sets
+        of the selected set's folder."""
+        from mccs_data_qa.reports.report import station_key
+
+        s = STATE['set']
+        fields, values = form_state(script)
+        values = dict(values)  # The options as they are now
+        argv = build_argv(fields, values)
+        sel = cards[name]['cal']
+        cal_names = [] if sel is None or not sel.value else sel.value if sel.multiple else [sel.value]
+        sets = sorted(
+            (p for p in s.parent.iterdir() if (p / SET_YAML).exists()), key=lambda p: station_key(p.name)
+        )
+        # Reads each set's yaml and first UVX file
+        states = await run.io_bound(lambda: [batch_state(p, name, values, cal_names) for p in sets])
+        boxes = {}
+        with ui.dialog() as dialog, ui.card().classes('w-[40rem] max-w-full'):
+            ui.label(f'Batch {INFO[name][1]}').classes('text-h6')
+            if name == 'calibration':
+                ui.label(f'Run: {run_dir(s, name, values).name}').classes('text-xs font-mono')
+            ui.label(f'Options on every set: {shlex.join(argv) or "defaults"}').classes(
+                'text-xs font-mono break-all'
+            )
+            if cal_names:
+                ui.label(f'Calibration runs read: {" ".join(cal_names)}').classes('text-xs font-mono')
+            with ui.row().classes('w-full items-center gap-1'):
+                ui.label(f'Sets in {s.parent.name}/').classes('eyebrow grow')
+                ui.button('All', on_click=lambda: tick_all(True)).props('flat dense no-caps')
+                ui.button('None', on_click=lambda: tick_all(False)).props('flat dense no-caps')
+            with ui.scroll_area().classes('w-full h-80 border rounded'):
+                for p, (reason, overwrites) in zip(sets, states, strict=True):
+                    with ui.row().classes('w-full items-center no-wrap gap-2'):
+                        box = ui.checkbox(p.name, value=not reason and not overwrites, on_change=lambda: count())
+                        box.set_enabled(not reason)
+                        if not reason:
+                            boxes[p] = box
+                        note = reason or ('re-run (overwrites)' if overwrites else '')
+                        ui.label(note).classes(f'text-xs {"text-orange-9" if reason else "text-grey-7"}')
+            with ui.row().classes('w-full justify-end'):
+                ui.button('Cancel', on_click=lambda: dialog.submit(False)).props('flat no-caps')
+                go = ui.button(icon='playlist_add', on_click=lambda: dialog.submit(True)).props(
+                    'unelevated no-caps'
+                )
+
+        def tick_all(on: bool):
+            for b in boxes.values():
+                b.value = on
+
+        def count():
+            n = sum(b.value for b in boxes.values())
+            go.set_text(f'Queue {n} run{"s" * (n != 1)}')
+            go.set_enabled(n > 0)
+
+        count()
+        ok = await dialog
+        dialog.delete()
+        if not ok:
+            return
+        n = 0
+        for p, b in boxes.items():
+            # Re-checked, as the queue may have changed while the dialog was open
+            if b.value and not batch_state(p, name, values, cal_names)[0]:
+                enqueue(p, name, argv, run_dir(p, name, values), cal_paths(p, cal_names))
+                n += 1
+        ui.notify(f'Queued {n} {INFO[name][1]} run{"s" * (n != 1)}')
 
     async def import_dialog(s: Path):
         """Ask for a calibration run of another set, then copy it into this set."""
@@ -1497,13 +1665,18 @@ def index():
     @ui.refreshable
     def queue_view():
         live = [r for r in RUNS.values() if r.live]
-        ui.label('Running').classes('eyebrow')
+        view['live_rows'] = []  # (run, label) of each running report, updated by tick()
+        with ui.row().classes('w-full items-center no-wrap'):
+            ui.label('Running').classes('eyebrow grow')
+            view['mem'] = ui.label().classes('text-xs text-grey-7').tooltip(
+                'Memory in use, of the container limit if it has one, else of the machine'
+            )
         if not live:
             ui.label('Nothing running.').classes('text-xs text-grey-7')
         for r in live:
             with ui.row().classes('w-full items-center no-wrap'):
                 ui.label(run_label(r.dir)).classes('grow')
-                ui.label(f'{(time.time() - r.started) / 60:.0f} min').classes('text-xs text-grey-7')
+                view['live_rows'].append((r, ui.label().classes('text-xs text-grey-7')))
                 ui.button(icon='visibility', on_click=lambda r=r: show(r)).props('flat dense').tooltip(
                     'Show log'
                 )
@@ -1551,7 +1724,8 @@ def index():
             with ui.row().classes('w-full items-center no-wrap'):
                 ui.label(run_label(r.dir)).classes('grow')
                 ui.badge(r.status, color=STATUS_COLOR.get(r.status, 'negative')).props('rounded')
-                ui.label(f'{r.elapsed}, {ago(r.finished or r.started)}').classes('text-xs text-grey-7')
+                peak = f', peak {gib(r.peak_rss)}' if r.peak_rss else ''
+                ui.label(f'{r.elapsed}{peak}, {ago(r.finished or r.started)}').classes('text-xs text-grey-7')
                 ui.button(icon='visibility', on_click=lambda r=r: show(r)).props('flat dense').tooltip('Show')
 
     def update_card(s: Path, name: str, c: dict):
@@ -1581,17 +1755,18 @@ def index():
                 sel.set_value(options[0])
         caldirs = picked_cals(s, c['cal'])
         start_now = ready(Job(s, name, [], 0, d, caldirs))
-        enabled = (
-            script in PARSERS
-            and not missing_required(fields, values)
-            and not busy
-            and not reason
-            and (c['cal'] is None or bool(caldirs))
+        # A batch checks each set itself, so it needs only the options and calibration runs
+        batch_ok = (
+            script in PARSERS and not missing_required(fields, values) and (c['cal'] is None or bool(caldirs))
         )
+        enabled = batch_ok and not busy and not reason
         changed = sum(values[f.dest] != v for f, v in zip(fields, default_values(fields).values(), strict=True))
         qa = run_qa(d) if has_report and not busy and name != 'calibration' else 'unreviewed'
         label = qa_label(d, qa)
-        state = (status, color, note, start_now, enabled, has_report, r is not None, changed, d, n_runs, label)
+        state = (
+            *(status, color, note, start_now, enabled, batch_ok),
+            *(has_report, r is not None, changed, d, n_runs, label),
+        )
         if state == c.get('state'):
             return
         c['state'] = state
@@ -1613,6 +1788,7 @@ def index():
             c['run'].set_text('Queue re-run' if has_report else 'Queue')
             c['run'].props('icon=playlist_add')
         c['run'].set_enabled(enabled)
+        c['batch'].set_enabled(batch_ok)
         if c['opts']:
             c['report'].set_enabled(has_report)
             c['log'].set_enabled(r is not None)
@@ -1630,6 +1806,10 @@ def index():
         if q != view['queue']:
             view['queue'] = q
             queue_view.refresh()
+        used, limit = memory_use()
+        set_text(view['mem'], f'Memory {gib(used)} of {gib(limit)}')
+        for lr, lbl in view['live_rows']:
+            set_text(lbl, f'{lr.elapsed}, {gib(lr.rss)} (peak {gib(lr.peak_rss)})')
         r = view['run']
         if r is not None and RUNS.get(r.dir) not in (None, r):
             # A queued re-run of the shown folder has started
@@ -1643,7 +1823,9 @@ def index():
             log.push(line)
         view['n'] = len(r.lines)
         took = f', {"running for" if r.live else "took"} {r.elapsed}' if r.elapsed else ''
-        status_label.set_text(f'{r.status}{took}')
+        mem = f', {gib(r.rss)} memory' if r.live else ''
+        mem += f' (peak {gib(r.peak_rss)})' if r.peak_rss else ''
+        set_text(status_label, f'{r.status}{took}{mem}')
         cmd.set_text(r.command)
         progress.set_text(r.progress)
         # Also watch the report file, as runs started by another process or before a restart
