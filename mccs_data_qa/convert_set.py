@@ -76,8 +76,11 @@ def main_eb():
 
 
 def set_folder(out_dir, set_id, date):
-    """ Folder a set is converted to: <out_dir>/set<id>_<UTC date, yyyy-mm-dd>. """
-    return f"{out_dir}/set{set_id}_{pd.to_datetime(date):%Y-%m-%d}"
+    """ Folder a set is converted to: <out_dir>/set_<UTC date, yyyy-mm-dd>_<LST, 0.1 hr>, e.g. set_2026-10-01_205.
+
+    The Set ID is yyyymmdd * 1000 + LST in 0.1 hr (analyse.set_id), so the folder holds the same information, readably.
+    """
+    return f"{out_dir}/set_{pd.to_datetime(date):%Y-%m-%d}_{set_id % 1000:03d}"
 
 
 def build_parser():

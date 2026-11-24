@@ -28,18 +28,18 @@ def test_sets_page_reads_analyse_workbook(tmp_path):
     row = rows[0]
     # Every grid column is filled from the workbook or the row state
     assert {c['field'] for c in set_columns()} <= set(row)
-    assert row['folder'] == set_folder(tmp_path, 20260729070, '2026-07-29') == f'{tmp_path}/set20260729070_2026-07-29'
+    assert row['folder'] == set_folder(tmp_path, 20260729070, '2026-07-29') == f'{tmp_path}/set_2026-07-29_070'
     assert (row['action'], row['qa'], row['status']) == ('convert', '', 'OK')
     assert [o['Station ID'] for o in details[20260729070]] == ['s8-1', 's9-2']
 
     # Once converted, the row offers a re-convert and shows the set as unreviewed
-    (tmp_path / 'set20260729070_2026-07-29').mkdir()
-    (tmp_path / 'set20260729070_2026-07-29' / SET_YAML).write_text('set_id: 20260729070\n')
+    (tmp_path / 'set_2026-07-29_070').mkdir()
+    (tmp_path / 'set_2026-07-29_070' / SET_YAML).write_text('set_id: 20260729070\n')
     row = load_sets(xlsx, tmp_path)[0][0]
     from mccs_data_qa.reports.report_ui import set_row_state
 
-    assert set_row_state(row, {'set20260729070_2026-07-29'})['action'] == 'reconvert'
-    assert set_row_state(row, {'set20260729070_2026-07-29'})['qa'] == 'unreviewed'
+    assert set_row_state(row, {'set_2026-07-29_070'})['action'] == 'reconvert'
+    assert set_row_state(row, {'set_2026-07-29_070'})['qa'] == 'unreviewed'
 
 
 def test_convert_form_is_lossless_unless_switched():

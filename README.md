@@ -60,8 +60,8 @@ row. Conversions go into `--root` with the Convert options. **Update database** 
 These jobs run one at a time, alongside the reports.
 
 A Set ID is the set's UTC date and LST, `yyyymmdd` then LST in 0.1 hr (2026-09-15 at LST 14.4 is
-`20260915144`), so deleting or adding data never renumbers other sets. Folders converted under the old
-sequential IDs (`set12_...`) are renamed once with `python -m mccs_data_qa.migrate_set_ids --sweeps-dir sweeps --dry-run`
+`20260915144`, converted into `set_2026-09-15_144/`), so deleting or adding data never renumbers other
+sets. Folders converted under the old sequential IDs (`set12_...`) are renamed once with `python -m mccs_data_qa.migrate_set_ids --sweeps-dir sweeps --dry-run`
 (drop `--dry-run` to apply), then rerun `mccs-analyse`.
 
 QA marks record the reviewer's initials, set from the

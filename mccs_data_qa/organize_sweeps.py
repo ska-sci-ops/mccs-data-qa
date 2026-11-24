@@ -1,11 +1,11 @@
-""" organize_sweeps.py -- move loose eb-* sweep files into set<id>_<UTC date>/ folders, adding calibration_set.yaml where missing. """
+""" organize_sweeps.py -- move loose eb-* sweep files into set_<UTC date>_<LST>/ folders (convert_set.set_folder), adding calibration_set.yaml where missing. """
 
 import argparse
 import glob
 import os
 import shutil
 import pandas as pd
-from mccs_data_qa.convert_set import write_set_yaml
+from mccs_data_qa.convert_set import set_folder, write_set_yaml
 
 
 def main():
@@ -26,7 +26,7 @@ def main():
                 print(f"SKIP {name}: not in sheet")
             continue
         r = by_eb.loc[eb_id]
-        dst_dir = f"{a.sweeps_dir}/set{r['Set ID']}_{pd.to_datetime(r['Date (UTC)']):%Y-%m-%d}"
+        dst_dir = set_folder(a.sweeps_dir, r['Set ID'], r['Date (UTC)'])
         print(f"MOVE {name} -> {os.path.basename(dst_dir)}/")
         if a.dry_run:
             continue
@@ -36,10 +36,11 @@ def main():
             continue
         shutil.move(src, dst_dir)
 
-    for d in sorted(glob.glob(f"{a.sweeps_dir}/set*_*")):
+    for d in sorted(glob.glob(f"{a.sweeps_dir}/set_*_*")):
         if os.path.exists(f"{d}/calibration_set.yaml"):
             continue
-        set_id = int(os.path.basename(d)[3:].split('_')[0])
+        _, day, lst = os.path.basename(d).split('_')  # set_<yyyy-mm-dd>_<LST, 0.1 hr>
+        set_id = int(day.replace('-', '')) * 1000 + int(lst)
         rows = det[det['Set ID'] == set_id]
         files = {f.split('_s')[0]: f for f in os.listdir(d) if f.endswith('.uvx')}
         filelist = [dict(observation_id=e, station_id=r['Station ID'].lower(), file=f"{d}/{files[e]}", status='ok')
