@@ -6,11 +6,13 @@ import html
 import inspect
 import os
 import re
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
 import astropy.units as u
 import matplotlib as mpl
+import matplotlib.pyplot as plt
 import numpy as np
 from jinja2 import Environment, FileSystemLoader
 from loguru import logger
@@ -437,6 +439,31 @@ def figs(names: list, prefix: str = 'plots/', captions: list | None = None) -> s
         for n, cap in zip(names, captions, strict=True)
     )
     return f'<div class="fig-grid">{items}</div>'
+
+
+def guarded(label: str, build) -> tuple[str, bool]:
+    """Run `build()` for a report section's HTML; if it raises, an error card takes its place.
+
+    One failing plot (e.g. on NaN data) then costs that section, not the whole report. The traceback is
+    logged, so it is also in the run's log, and any half-drawn figures are closed.
+
+    Returns:
+        html (str): The section's HTML, or the error card.
+        ok (bool): False if `build()` raised.
+    """
+    try:
+        return build(), True
+    except Exception:
+        tb = traceback.format_exc()
+        logger.error(f'{label} failed:\n{tb}')
+        plt.close('all')
+        return f'<div class="card"><h2>{html.escape(label)} failed</h2><pre>{html.escape(tb)}</pre></div>', False
+
+
+def guarded_tab(tab_id: str, label: str, build) -> tuple[str, str, str]:
+    """A (id, label, html) report tab from `guarded()`, its label marked '(failed)' if `build()` raised."""
+    body, ok = guarded(label, build)
+    return tab_id, label if ok else f'{label} (failed)', body
 
 
 def subtabs(tabs: list) -> str:

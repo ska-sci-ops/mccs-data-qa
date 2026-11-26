@@ -38,6 +38,8 @@ from mccs_data_qa.reports.report import (
     cal_variant,
     figs,
     find_station_files,
+    guarded,
+    guarded_tab,
     read_station,
     station_key,
     table,
@@ -330,6 +332,33 @@ def _delay_resid(delaydir: Path, beams: list, sky_model: str) -> dict:
     return out
 
 
+def _sweep_cal_html(out: Path, beams: list, sky_model: str, caldir, delaydir) -> str:
+    """Sun flux spread and delay-fit residuals of the sweep calibrations, or '' if there are none."""
+    extra = ''
+    spread = _sun_flux_spread(Path(caldir), beams, sky_model) if caldir else {}
+    if spread:
+        fig, ax = plt.subplots(figsize=(8, 3.5))
+        for b, (f, s) in spread.items():
+            ax.plot(f, s, '.', ms=3, label=f'{b} (median {100 * np.nanmedian(s):.1f}%)')
+        ax.set_xlabel('Frequency [MHz]')
+        ax.set_ylabel('Sun flux std / mean across stations')
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out / 'sun_flux_spread.png', dpi=100)
+        plt.close(fig)
+        extra += figs(
+            ['sun_flux_spread'], prefix='', captions=['Spread of the fitted Sun flux between stations']
+        )
+    dres = _delay_resid(Path(delaydir), beams, sky_model) if delaydir else {}
+    if dres:
+        stations = sorted({s for v in dres.values() for s in v}, key=station_key)
+        dtab = table(
+            ['Beam', *stations], [[b, *(f'{v.get(s, np.nan):.3f}' for s in stations)] for b, v in dres.items()]
+        )
+        extra += f'<div class="card"><h2>Median delay-fit phase residual rms [rad]</h2>{dtab}</div>'
+    return extra
+
+
 def compare_beams(
     files: list,
     outdir: str,
@@ -412,47 +441,36 @@ def compare_beams(
         header += [b, f'{b} / {base}' + ' (median)', f'channels {b} better']
     verdict = table(header, rows)
 
-    plots = [_plot_metric(results, beams, k, out) for k in ('res_in', 'res_bl', 'res_t1', 'gain_scatter')]
-    captions = [METRICS[k] for k in ('res_in', 'res_bl', 'res_t1', 'gain_scatter')]
-    body = f'<div class="card"><h2>Medians over channels</h2>{verdict}</div>'
-    body += figs([p.removesuffix('.png') for p in plots], prefix='', captions=captions)
-    tabs = [('summary', 'Summary', body)]
+    keys = ('res_in', 'res_bl', 'res_t1', 'gain_scatter')
+    # Plots are guarded: a plot that fails shows its error, the rest of the report still renders
+    plots, _ = guarded(
+        'Metric plots',
+        lambda: figs(
+            [_plot_metric(results, beams, k, out).removesuffix('.png') for k in keys],
+            prefix='',
+            captions=[METRICS[k] for k in keys],
+        ),
+    )
+    tabs = [('summary', 'Summary', f'<div class="card"><h2>Medians over channels</h2>{verdict}</div>{plots}')]
 
     if all(r['controls'] for r in results):
-        fn = _plot_controls(results, beams, out)
-        ctl = figs(
-            [fn.removesuffix('.png')],
-            prefix='',
-            captions=[
-                'EEP null controls at one channel: held-out baseline residual, and against rotation offset'
-            ],
+        tabs.append(
+            guarded_tab(
+                'controls',
+                'Controls',
+                lambda: figs(
+                    [_plot_controls(results, beams, out).removesuffix('.png')],
+                    prefix='',
+                    captions=[
+                        'EEP null controls at one channel: held-out baseline residual, and against rotation offset'
+                    ],
+                ),
+            )
         )
-        tabs.append(('controls', 'Controls', ctl))
 
-    extra = ''
-    spread = _sun_flux_spread(Path(caldir), beams, sky_model) if caldir else {}
-    if spread:
-        fig, ax = plt.subplots(figsize=(8, 3.5))
-        for b, (f, s) in spread.items():
-            ax.plot(f, s, '.', ms=3, label=f'{b} (median {100 * np.nanmedian(s):.1f}%)')
-        ax.set_xlabel('Frequency [MHz]')
-        ax.set_ylabel('Sun flux std / mean across stations')
-        ax.legend()
-        fig.tight_layout()
-        fig.savefig(out / 'sun_flux_spread.png', dpi=100)
-        plt.close(fig)
-        extra += figs(
-            ['sun_flux_spread'], prefix='', captions=['Spread of the fitted Sun flux between stations']
-        )
-    dres = _delay_resid(Path(delaydir), beams, sky_model) if delaydir else {}
-    if dres:
-        stations = sorted({s for v in dres.values() for s in v}, key=station_key)
-        dtab = table(
-            ['Beam', *stations], [[b, *(f'{v.get(s, np.nan):.3f}' for s in stations)] for b, v in dres.items()]
-        )
-        extra += f'<div class="card"><h2>Median delay-fit phase residual rms [rad]</h2>{dtab}</div>'
-    if extra:
-        tabs.append(('sweep', 'Sweep cal', extra))
+    tab = guarded_tab('sweep', 'Sweep cal', lambda: _sweep_cal_html(out, beams, sky_model, caldir, delaydir))
+    if tab[2]:
+        tabs.append(tab)
     tabs.append(('settings', 'Settings', f'<div class="card">{args_table(cli_args or {})}</div>'))
 
     info = [

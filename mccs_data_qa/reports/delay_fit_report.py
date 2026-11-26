@@ -25,6 +25,7 @@ from mccs_data_qa.reports.report import (
     args_table,
     cluster_tabs,
     figs,
+    guarded_tab,
     input_parser,
     parse_flag_freqs,
     parse_stations,
@@ -398,15 +399,6 @@ def delay_fit_report(
     plotdir = outdir / 'plots'
     plotdir.mkdir(parents=True, exist_ok=True)
 
-    phase_figs, phase_caps, resid_figs, spec_figs, delay_figs = [], [], [], [], []
-    for name, res in results.items():
-        for p_idx in range(2):
-            phase_figs.append(_plot_phase_fits(name, res, p_idx, plotdir))
-            phase_caps.append(f'{name} {POLS[p_idx]}: measured phase (black) and delay model (red)')
-        resid_figs.append(_plot_residuals(name, res, plotdir))
-        spec_figs.append(_plot_delay_spectra(name, res, plotdir))
-        delay_figs.append(_plot_delays(name, res, positions, plotdir))
-
     summary = table(['Calibration', *SUMMARY_COLS], [_summary_row(name, res) for name, res in results.items()])
 
     def rel(path: str) -> str:
@@ -443,12 +435,24 @@ def delay_fit_report(
             f'<div class="card"><h2>Delay fits</h2>{summary}'
             f'<h2>Delay-model calibration files</h2><ul>{cal_links}</ul></div>',
         ),
-        ('phase', 'Phase fits', figs(phase_figs, captions=phase_caps)),
-        (
+        # Plot tabs are guarded: a plot that fails shows its error, the rest of the report still renders
+        guarded_tab(
+            'phase',
+            'Phase fits',
+            lambda: figs(
+                [_plot_phase_fits(n, r, p, plotdir) for n, r in results.items() for p in range(2)],
+                captions=[
+                    f'{n} {POLS[p]}: measured phase (black) and delay model (red)'
+                    for n in results
+                    for p in range(2)
+                ],
+            ),
+        ),
+        guarded_tab(
             'residuals',
             'Residuals',
-            figs(
-                resid_figs,
+            lambda: figs(
+                [_plot_residuals(n, r, plotdir) for n, r in results.items()],
                 captions=[
                     f'{n}: residual phase (data - fit), flagged antennas and channels blank. Structure common '
                     f'to every antenna includes the reference antenna ({results[n]["fit"]["ref_ant"]}), negated.'
@@ -458,15 +462,21 @@ def delay_fit_report(
                 ],
             ),
         ),
-        (
+        guarded_tab(
             'spectra',
             'Delay spectra',
-            figs(spec_figs, captions=[f'{n}: delay spectrum per antenna' for n in results]),
+            lambda: figs(
+                [_plot_delay_spectra(n, r, plotdir) for n, r in results.items()],
+                captions=[f'{n}: delay spectrum per antenna' for n in results],
+            ),
         ),
-        (
+        guarded_tab(
             'delays',
             'Delays',
-            figs(delay_figs, captions=[f'{n}: fitted delays' for n in results])
+            lambda: figs(
+                [_plot_delays(n, r, positions, plotdir) for n, r in results.items()],
+                captions=[f'{n}: fitted delays' for n in results],
+            )
             + f'<div class="card"><h2>Per-antenna fits</h2>{ant_tables}</div>',
         ),
         *(extra_tabs or []),
@@ -593,37 +603,46 @@ def delay_fit_summary(outdir: str | Path) -> Path | None:
         if s in results
     ]
     summary = table(['Station', 'Calibration run', *SUMMARY_COLS], rows)
-    by_station = {
-        s: [
-            (
-                _plot_station_runs(s, {run: r[s]['fit'] for run, r in runs.items() if s in r}, plotdir),
-                f"{s}: fitted delay (each run's median removed), residual rms and coherence per antenna; "
-                'flagged and reference antennas left out',
-            )
-        ]
-        for s in stations
-    }
-    # A sub-tab per reference run, with every other run against it
-    compare = []
-    for i, ref in enumerate(runs):
-        stems = {
-            run: _plot_delay_comparison(ref, run, runs[ref], runs[run], plotdir) for run in runs if run != ref
-        }
-        stems = {run: stem for run, stem in stems.items() if stem}
-        captions = [
-            f'{run} against {ref}: fitted delays of antennas unflagged in both. A constant offset comes from '
-            'a different reference antenna.'
-            for run in stems
-        ]
-        compare.append((f'compare-{i}', ref, figs(list(stems.values()), captions=captions)))
+
+    def by_station():
+        return cluster_tabs(
+            'stations',
+            {
+                s: [
+                    (
+                        _plot_station_runs(s, {run: r[s]['fit'] for run, r in runs.items() if s in r}, plotdir),
+                        f"{s}: fitted delay (each run's median removed), residual rms and coherence per antenna; "
+                        'flagged and reference antennas left out',
+                    )
+                ]
+                for s in stations
+            },
+        )
+
+    def compare():
+        # A sub-tab per reference run, with every other run against it
+        tabs = []
+        for i, ref in enumerate(runs):
+            stems = {
+                run: _plot_delay_comparison(ref, run, runs[ref], runs[run], plotdir) for run in runs if run != ref
+            }
+            stems = {run: stem for run, stem in stems.items() if stem}
+            captions = [
+                f'{run} against {ref}: fitted delays of antennas unflagged in both. A constant offset comes '
+                'from a different reference antenna.'
+                for run in stems
+            ]
+            tabs.append((f'compare-{i}', ref, figs(list(stems.values()), captions=captions)))
+        return subtabs(tabs)
+
     info = [
         ('Calibration runs', f'{len(runs)}: {", ".join(runs)}'),
         ('Stations', len(stations)),
     ]
     tabs = [
         ('summary', 'Summary', f'<div class="card"><h2>Delay fits per station and run</h2>{summary}</div>'),
-        ('stations', 'By station', cluster_tabs('stations', by_station)),
-        ('compare', 'Delay comparison', subtabs(compare)),
+        guarded_tab('stations', 'By station', by_station),
+        guarded_tab('compare', 'Delay comparison', compare),
     ]
     write_report(index_fn, 'Delay Fit Comparison', info, tabs, show_version())
     return index_fn

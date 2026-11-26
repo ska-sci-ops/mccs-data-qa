@@ -35,6 +35,7 @@ from mccs_data_qa.reports.report import (
     check_cal_args,
     figs,
     find_station_files,
+    guarded,
     metadata_table,
     obs_start,
     parse_flag_freqs,
@@ -311,9 +312,6 @@ def run_stefcal(
     cal_paths = run_in_parallel(tasks, n_workers=n_jobs, verbose=True)
     uvxs = [read_station(fn, ignore_static_flags) for fn in files]
     cals = {uvx.name: read_cal(p) for uvx, p in zip(uvxs, cal_paths, strict=True)}
-    fn_cal_mag = _plot_gains_vs_freq(cals, outdir_path, 'mag')
-    fn_cal_phs = _plot_gains_vs_freq(cals, outdir_path, 'phs')
-
     stations = list(cals)
     f_mhz = next(iter(cals.values())).gains.frequency.values / 1e6
     utc0, lst0 = obs_start(uvxs[0])
@@ -360,8 +358,18 @@ def run_stefcal(
             'Calibration vs frequency',
             f'<div class="card"><h2>Calibration summary</h2>{summary}'
             f'<h2>Calibration files</h2><ul>{cal_links}</ul></div>'
-            + fig(fn_cal_mag, 'Gain magnitude (correction applied to the data), XX and YY')
-            + fig(fn_cal_phs, 'Gain phase relative to a reference antenna, XX and YY'),
+            # A failing plot shows its error; the summary and cal file links still render
+            + guarded(
+                'Gain plots',
+                lambda: fig(
+                    _plot_gains_vs_freq(cals, outdir_path, 'mag'),
+                    'Gain magnitude (correction applied to the data), XX and YY',
+                )
+                + fig(
+                    _plot_gains_vs_freq(cals, outdir_path, 'phs'),
+                    'Gain phase relative to a reference antenna, XX and YY',
+                ),
+            )[0],
         ),
         ('metadata', 'Metadata', f'<div class="card"><h2>UVX file metadata</h2>{meta_table}</div>'),
         ('settings', 'Settings', f'<div class="card"><h2>Runtime arguments</h2>{settings_table}</div>'),
@@ -471,18 +479,19 @@ def write_summary(outdir: str | Path) -> Path | None:
             for s in stations
         ],
     )
-    fn_dg = _plot_runs_vs_freq(runs, outdir, 'dg')
-    fn_mag = _plot_runs_vs_freq(runs, outdir, 'mag')
     body = (
         f'<div class="card"><h2>Runs</h2>{runs_table}<h2>Flagged antennas per station</h2>{station_table}</div>'
-        + figs(
-            [fn_dg.removesuffix('.png'), fn_mag.removesuffix('.png')],
-            prefix='',
-            captions=[
-                'StefCal convergence (dG) per channel, flagged channels blank; holography runs have none',
-                'Median XX/YY gain magnitude over unflagged antennas; Sun-only runs have no flux scale',
-            ],
-        )
+        + guarded(
+            'Run comparison plots',
+            lambda: figs(
+                [_plot_runs_vs_freq(runs, outdir, k).removesuffix('.png') for k in ('dg', 'mag')],
+                prefix='',
+                captions=[
+                    'StefCal convergence (dG) per channel, flagged channels blank; holography runs have none',
+                    'Median XX/YY gain magnitude over unflagged antennas; Sun-only runs have no flux scale',
+                ],
+            ),
+        )[0]
     )
     info = [('Runs', len(runs)), ('Stations', f'{len(stations)}: {", ".join(stations)}')]
     write_report(

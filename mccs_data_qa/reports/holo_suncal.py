@@ -25,6 +25,7 @@ from mccs_data_qa.reports.report import (
     calibrate_sweep,
     cluster_tabs,
     find_station_files,
+    guarded,
     input_parser,
     parse_flag_freqs,
     read_station,
@@ -180,14 +181,21 @@ def holo_suncal(
     cal_paths = run_in_parallel(tasks, n_workers=n_jobs, verbose=True)
     results = run_delay_fits(cal_paths, rundir / 'delay', flag_freqs, ref_ant, min_coherence, sigma_thr, zero_phase0)
 
-    apertures, farfields = {}, {}
+    apertures, farfields, errors = {}, {}, ''
     for fn, res in zip(files, results.values(), strict=True):
         cals = {'holography cal': res['file'], 'delay-model cal': res['delay_cal']}
-        name, ap, ff = _plot_apertures(fn, cals, freq_idx, plotdir, ignore_static_flags)
-        apertures[name], farfields[name] = ap, ff
+        # One station's plot failing shows as an error card, not a lost report
+        body, ok = guarded(
+            f'Aperture plots of {Path(fn).name}',
+            lambda fn=fn, cals=cals: _plot_apertures(fn, cals, freq_idx, plotdir, ignore_static_flags),
+        )
+        if ok:
+            name, apertures[name], farfields[name] = body
+        else:
+            errors += body
     extra_tabs = [
-        ('aperture', 'Aperture', cluster_tabs('aperture', apertures)),
-        ('farfield', 'Beam pattern', cluster_tabs('farfield', farfields)),
+        ('aperture', 'Aperture', errors + cluster_tabs('aperture', apertures)),
+        ('farfield', 'Beam pattern', errors + cluster_tabs('farfield', farfields)),
     ]
 
     index_fn = delay_fit_report(

@@ -9,12 +9,15 @@ Usage:
 """
 
 import argparse
+import html
 import json
+import warnings
 from pathlib import Path
 
 import healpy as hp
 import numpy as np
 import pylab as plt
+from loguru import logger
 from mccs_data_qa.reports.report import (
     AA1_GRID,
     AA1_GRID_COLS,
@@ -27,6 +30,7 @@ from mccs_data_qa.reports.report import (
     check_cal_args,
     figs,
     find_station_files,
+    guarded_tab,
     metadata_table,
     obs_start,
     read_station,
@@ -58,7 +62,7 @@ def _load_and_calibrate(
     beam: str = 'aep-harp',
     suncal_kwargs: dict | None = None,
     ignore_static_flags: bool = False,
-) -> tuple[dict, dict, dict, list[str]]:
+) -> tuple[dict, dict, dict, list[str], dict, dict]:
     """Read each UVX file, run flagging + stefcal at freq_idx, and flag bad stations by dG.
 
     The calibration options are those of `report.calibrate_channel()`. With sun+sky and the Sun up,
@@ -68,31 +72,57 @@ def _load_and_calibrate(
         aas (dict): ApertureArray per station name.
         dgs (dict): Final stefcal dG per station name.
         suns (dict): suncal provenance per station name, or None where the Sun wasn't used.
-        bad_stations (list): Stations with dG above dg_threshold, a bad timestamp at freq_idx, or no
-            suncal flux scale.
+        bad_stations (list): Stations with dG above dg_threshold (or NaN), a bad timestamp at freq_idx,
+            or no suncal flux scale.
+        failed (dict): Error per station (file name, if it could not be read) that failed to load or
+            calibrate; these are left out of the other outputs.
+        srcs (dict): UVX file per station in `aas`.
     """
-    aas = {}
+    aas, failed, srcs = {}, {}, {}
     for fn in files:
-        aa = ApertureArray(read_station(fn, ignore_static_flags))
+        try:
+            aa = ApertureArray(read_station(fn, ignore_static_flags))
+        except Exception as err:
+            logger.exception(f'Cannot read {fn}')
+            failed[Path(fn).name] = repr(err)
+            continue
         aa.set_task_verbosity('silent')
         # All calibration, plots and images use this channel
         aa.set_idx(f=freq_idx)
-        aas[aa.name] = aa
+        aas[aa.name], srcs[aa.name] = aa, fn
 
     dgs, suns, bad_stations = {}, {}, []
-    for name, aa in aas.items():
-        flags = aa.calibration.flagging.run_flagging()
-        model = station_cal_model(aa, cal_model)
-        cal, dgs[name] = calibrate_channel(aa, model, leakage, beam, sky_model, sigma_thr, flags, suncal_kwargs)
+    for name, aa in list(aas.items()):
+        try:
+            flags = aa.calibration.flagging.run_flagging()
+            model = station_cal_model(aa, cal_model)
+            cal, dg = calibrate_channel(aa, model, leakage, beam, sky_model, sigma_thr, flags, suncal_kwargs)
+            aa.set_cal(cal)
+        except Exception as err:
+            # One station's failure shouldn't lose the others' report
+            logger.exception(f'Cannot calibrate {name}')
+            failed[name] = repr(err)
+            del aas[name], srcs[name]
+            continue
+        dgs[name] = dg
         suns[name] = cal.provenance.get('suncal')
-        aa.set_cal(cal)
         # With a bad timestamp its sky model (and so its cal and images) is for the wrong time, and
-        # without a suncal flux scale its gains are not in Jy
+        # without a suncal flux scale its gains are not in Jy. A NaN dG means the cal diverged.
         bad_time = bad_channel_times(aa.uvx)[freq_idx]
         no_scale = suns[name] is not None and not suns[name]['flux_scale']
-        if dgs[name] > dg_threshold or bad_time or no_scale:
+        if not dgs[name] <= dg_threshold or bad_time or no_scale:
             bad_stations.append(name)
-    return aas, dgs, suns, bad_stations
+    if not aas:
+        raise RuntimeError(f'Every station failed to load or calibrate: {failed}')
+    return aas, dgs, suns, bad_stations, failed, srcs
+
+
+def _nanmean(arrays: list) -> np.ndarray:
+    """Mean over stations, ignoring each station's NaN (or masked) pixels; NaN where none has data."""
+    stack = np.array([np.ma.filled(np.ma.asarray(a), np.nan) for a in arrays])
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)  # Mean of empty slice
+        return np.nanmean(stack, axis=0)
 
 
 def _plot_antenna_flags(aas: dict, bad_stations: list[str], outdir: Path) -> str:
@@ -193,8 +223,9 @@ def _combined_healpix(aas: dict, bad_stations: list[str], freq_idx: int, outdir:
     good = {name: aa for name, aa in aas.items() if name not in bad_stations}
     hpxs = {name: aa.imaging.make_healpix(vis='cal', include_autos=True) for name, aa in good.items()}
     aa = next(iter(good.values()))
+    # One station's NaN pixels would otherwise blank those pixels in the average
     hpx_avg = PolHpxImage(
-        np.mean(np.ma.array(list(hpxs.values())), axis=0),
+        np.ma.masked_invalid(_nanmean(list(hpxs.values()))),
         basis='linear',
         unit=aa.vis_unit('cal'),
         fill_value=np.nan,
@@ -203,13 +234,17 @@ def _combined_healpix(aas: dict, bad_stations: list[str], freq_idx: int, outdir:
     # Colour scale from the sky outside the Sun, so the diffuse emission is visible.
     # SUN_MASK_FWHM beam widths covers the Sun's main lobe and first sidelobes.
     img_i = np.ma.filled(hpx_avg.stokes[..., 0], np.nan)
+    if not np.isfinite(img_i).any():
+        raise ValueError('The station-averaged image has no finite pixels')
     n_side = hp.npix2nside(len(img_i))
     fwhm = sim_station_beam_properties(aa)['fwhm']
     sun_pix = hp.query_disc(
         n_side, hp.pix2vec(n_side, sky2hpix(n_side, aa.coords.get_sun())), radius=SUN_MASK_FWHM * fwhm
     )
-    img_i[sun_pix] = np.nan
-    vmax = np.nanmax(img_i)
+    sky = img_i.copy()
+    sky[sun_pix] = np.nan
+    # If the Sun mask leaves no finite sky, scale to the whole image (an all-NaN max breaks the colorbar)
+    vmax = np.nanmax(sky) if np.isfinite(sky).any() else np.nanmax(img_i)
 
     f_mhz = aa.f[freq_idx].to_value('MHz')
     plt.figure(figsize=(6, 6))
@@ -269,7 +304,7 @@ def quicklook_aa1(
     outdir_path = Path(outdir)
     outdir_path.mkdir(parents=True, exist_ok=True)
 
-    aas, dgs, suns, bad_stations = _load_and_calibrate(
+    aas, dgs, suns, bad_stations, failed, srcs = _load_and_calibrate(
         files,
         freq_idx,
         sigma_thr,
@@ -282,19 +317,59 @@ def quicklook_aa1(
         ignore_static_flags,
     )
 
-    fn_flags = _plot_antenna_flags(aas, bad_stations, outdir_path)
-    fn_corr = _plot_corr_matrices(aas, bad_stations, outdir_path)
-    fn_uvdist = _plot_uvdist(aas, bad_stations, outdir_path)
-    imgs, fn_allsky = _plot_allsky_images(aas, bad_stations, outdir_path)
-    _, fn_allsky_uncal = _plot_allsky_images(aas, bad_stations, outdir_path, vis='data')
+    def fig(fn, caption):
+        return figs([fn.removesuffix('.png')], prefix='', captions=[caption])
+
+    # Each plot tab is guarded: a plot that fails (e.g. on NaN data) shows its error, the rest still render
+    imgs = {}
+
+    def allsky():
+        cal_imgs, fn_cal = _plot_allsky_images(aas, bad_stations, outdir_path)
+        imgs.update(cal_imgs)  # For the station average below
+        _, fn_uncal = _plot_allsky_images(aas, bad_stations, outdir_path, vis='data')
+        return fig(fn_cal, 'Calibrated') + fig(fn_uncal, 'Before calibration')
+
+    plot_tabs = [
+        guarded_tab('allsky', 'All-sky images', allsky),  # First tab is the one open by default
+        guarded_tab(
+            'flags',
+            'Flagged antennas',
+            lambda: fig(_plot_antenna_flags(aas, bad_stations, outdir_path), 'Flagged antennas'),
+        ),
+        guarded_tab(
+            'corr',
+            'Correlation matrix',
+            lambda: fig(_plot_corr_matrices(aas, bad_stations, outdir_path), 'Correlation matrix'),
+        ),
+        guarded_tab(
+            'uvdist',
+            'UV distance',
+            lambda: figs(
+                [fn.removesuffix('.png') for fn in _plot_uvdist(aas, bad_stations, outdir_path)],
+                prefix='',
+                captions=list(aas),
+            ),
+        ),
+    ]
 
     # The station average, fractional differences and combined image need at least one good station
-    good_imgs = [imgs[name] for name in aas if name not in bad_stations]
+    good_imgs = [imgs[name] for name in aas if name not in bad_stations and name in imgs]
     if good_imgs:
-        img_avg = np.mean(np.array(good_imgs), axis=0)
-        fn_frac_x = _plot_frac_diff(aas, imgs, bad_stations, img_avg, 0, 'X-pol', outdir_path)
-        fn_frac_y = _plot_frac_diff(aas, imgs, bad_stations, img_avg, 3, 'Y-pol', outdir_path)
-        fn_combined_png, fn_combined_fits = _combined_healpix(aas, bad_stations, freq_idx, outdir_path)
+        img_avg = _nanmean(good_imgs)
+
+        def frac_diff():
+            fn_x = _plot_frac_diff(aas, imgs, bad_stations, img_avg, 0, 'X-pol', outdir_path)
+            fn_y = _plot_frac_diff(aas, imgs, bad_stations, img_avg, 3, 'Y-pol', outdir_path)
+            return fig(fn_x, 'X-pol') + fig(fn_y, 'Y-pol')
+
+        def combined():
+            fn_png, fn_fits = _combined_healpix(aas, bad_stations, freq_idx, outdir_path)
+            return fig(fn_png, f'Station-averaged healpix image, <a href="{fn_fits}">download FITS</a>')
+
+        plot_tabs += [
+            guarded_tab('fracdiff', 'Fractional differences', frac_diff),
+            guarded_tab('combined', 'Combined image', combined),
+        ]
 
     stations = list(aas)
     any_aa = next(iter(aas.values()))
@@ -306,6 +381,7 @@ def quicklook_aa1(
         ('LST start', lst0),
     ]
     badges = ''.join(f'<span class="badge">{name} excluded</span>' for name in bad_stations)
+    badges += ''.join(f'<span class="badge">{html.escape(name)} failed</span>' for name in failed)
     if cli_args is None:
         cli_args = {
             'freq_idx': freq_idx,
@@ -346,27 +422,14 @@ def quicklook_aa1(
                 *sun_cols(suns[s]),
             )
             for s in aas
-        ],
+        ]
+        + [(html.escape(s), 'failed: ' + html.escape(err), '', '', '', '', '') for s, err in failed.items()],
     )
-    meta_table = metadata_table(stations, files, [aa.uvx for aa in aas.values()])
-
-    def fig(fn, caption):
-        return figs([fn.removesuffix('.png')], prefix='', captions=[caption])
+    meta_table = metadata_table(stations, list(srcs.values()), [aa.uvx for aa in aas.values()])
 
     suncal_note = ' (suncal when the Sun is up)' if cal_model == 'sun+sky' else ''
     tabs = [
-        ('flags', 'Flagged antennas', fig(fn_flags, 'Flagged antennas')),
-        ('corr', 'Correlation matrix', fig(fn_corr, 'Correlation matrix')),
-        (
-            'uvdist',
-            'UV distance',
-            figs([fn.removesuffix('.png') for fn in fn_uvdist], prefix='', captions=list(aas)),
-        ),
-        (
-            'allsky',
-            'All-sky images',
-            fig(fn_allsky, 'Calibrated') + fig(fn_allsky_uncal, 'Before calibration'),
-        ),
+        *plot_tabs,
         ('metadata', 'Metadata', f'<div class="card"><h2>UVX file metadata</h2>{meta_table}</div>'),
         (
             'settings',
@@ -375,18 +438,6 @@ def quicklook_aa1(
             f'<h2>Calibration at channel {freq_idx}{suncal_note}</h2>{cal_table}</div>',
         ),
     ]
-    if good_imgs:
-        tabs[-2:-2] = [  # Before Metadata and Settings
-            ('fracdiff', 'Fractional differences', fig(fn_frac_x, 'X-pol') + fig(fn_frac_y, 'Y-pol')),
-            (
-                'combined',
-                'Combined image',
-                fig(
-                    fn_combined_png,
-                    f'Station-averaged healpix image, <a href="{fn_combined_fits}">download FITS</a>',
-                ),
-            ),
-        ]
     index_fn = outdir_path / 'index.html'
     write_report(index_fn, 'AA1 QA Report', info, tabs, show_version(), card_extra=badges)
     return index_fn

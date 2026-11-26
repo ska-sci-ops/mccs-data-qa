@@ -48,6 +48,7 @@ from mccs_data_qa.reports.report import (
     base_parser,
     figs,
     find_station_files,
+    guarded,
     metadata_table,
     read_station,
     table,
@@ -809,7 +810,7 @@ def run_plot(
             return []
         return [(d0['f_mhz'], scale * d0['senscalc_sefd_i'], sc_label, {'color': 'k', 'ls': '--'})]
 
-    for s, d in tqdm(dfs.items(), desc='station plots'):
+    def station_plots(s, d):
         f = d['f_mhz']
         for col in POL_COLS:
             lines = [(f, d[pol][col], pol.upper(), {}) for pol in ('xx', 'yy')]
@@ -876,104 +877,113 @@ def run_plot(
             )
         plt.savefig(path(f'{s}_sefd_ratio_ch{chan}'), bbox_inches='tight')
         plt.close(fig)
+        return ''
 
-    def per_pol(col):
-        return [
-            (d['f_mhz'], d[pol][col], f'{s} {pol.upper()}', {}) for s, d in dfs.items() for pol in ('xx', 'yy')
-        ]
+    def all_station_plots():
+        def per_pol(col):
+            return [
+                (d['f_mhz'], d[pol][col], f'{s} {pol.upper()}', {}) for s, d in dfs.items() for pol in ('xx', 'yy')
+            ]
 
-    plot_vs_freq(path('all_sefd_el_img'), UNITS['sefd_el_img'], per_pol('sefd_el_img'))
+        plot_vs_freq(path('all_sefd_el_img'), UNITS['sefd_el_img'], per_pol('sefd_el_img'))
 
-    # Element. Solid: measured. Dashed: radiometer prediction from calibrated autos. Dotted: sky-noise limit.
-    lines = []
-    for n, (s, d) in enumerate(dfs.items()):
-        color = f'C{n}'
-        f, i = d['f_mhz'], d['i']
-        lines += [
-            (f, i['sefd_i_el'], s, {'color': color}),
-            (f, i['sefd_i_el_pred'], None, {'color': color, 'ls': '--'}),
-            (f, i['sefd_i_el_sky'], None, {'color': color, 'ls': ':'}),
-        ]
-    plot_vs_freq(path('all_sefd_i_el'), UNITS['sefd_i_el'], lines)
+        # Element. Solid: measured. Dashed: radiometer prediction from calibrated autos. Dotted: sky-noise limit.
+        lines = []
+        for n, (s, d) in enumerate(dfs.items()):
+            color = f'C{n}'
+            f, i = d['f_mhz'], d['i']
+            lines += [
+                (f, i['sefd_i_el'], s, {'color': color}),
+                (f, i['sefd_i_el_pred'], None, {'color': color, 'ls': '--'}),
+                (f, i['sefd_i_el_sky'], None, {'color': color, 'ls': ':'}),
+            ]
+        plot_vs_freq(path('all_sefd_i_el'), UNITS['sefd_i_el'], lines)
 
-    # Station. Solid: beamformed. Dotted: element / 256, i.e. no sky noise correlated between elements.
-    lines = []
-    for n, (s, d) in enumerate(dfs.items()):
-        color = f'C{n}'
-        f, i = d['f_mhz'], d['i']
-        lines += [
-            (f, i['sefd_i_st'], s, {'color': color}),
-            (
-                f,
-                i['sefd_i_el'] / N_STATION_ANT,
-                '256 × uncorrelated elements' if n == 0 else None,
-                {'color': color, 'ls': ':', 'lw': 1},
-            ),
-        ]
-    lines += senscalc_line() + sys_req_lines(d0['f_mhz'], 'sefd', ARRAYS['AA4'])
-    plot_vs_freq(path('all_sefd_i_st'), UNITS['sefd_i_st'], lines)
-    plot_vs_freq(
-        path('all_sefd_i_st_zoom'),
-        UNITS['sefd_i_st'],
-        lines,
-        frange=ZOOM_ALL_MHZ,
-        ymin=zoom_ylim[0],
-        ymax=zoom_ylim[1],
-    )
-
-    aot_lines = [(d['f_mhz'], d['i']['a_over_t_i_st'], s, {}) for s, d in dfs.items()]
-    if senscalc_table:
-        aot_lines.append(
-            (d0['f_mhz'], TWO_K_JY / np.sqrt(2) / d0['senscalc_sefd_i'], sc_label, {'color': 'k', 'ls': '--'})
-        )
-    aot_lines += sys_req_lines(d0['f_mhz'], 'aot', ARRAYS['AA4'])
-    plot_vs_freq(path('all_a_over_t_i_st'), UNITS['a_over_t_i_st'], aot_lines)
-    # Solid: I. Dashed: V. Dash-dot: Q. Thin solid: U. Dotted: I against the uncorrelated-noise prediction.
-    lines = []
-    for n, (s, d) in enumerate(dfs.items()):
-        color = f'C{n}'
-        f, i = d['f_mhz'], d['i']
-        lines += [
-            (f, i['rho_i'], f'{s} I', {'color': color}),
-            (f, i['rho_q'], f'{s} Q', {'color': color, 'ls': '-.', 'lw': 1}),
-            (f, i['rho_u'], f'{s} U', {'color': color, 'lw': 0.5}),
-            (f, i['rho_v'], f'{s} V', {'color': color, 'ls': '--'}),
-            (f, i['rho_i_unc'], None, {'color': color, 'ls': ':', 'lw': 1}),
-        ]
-    plot_vs_freq(path('all_rho'), r'$\rho$ = measured / predicted noise', lines)
-
-    # Array sensitivity from the station mean, assuming identical 256-antenna beamformed stations
-    f = d0['f_mhz']
-
-    def station_mean(col):
-        # A spike-flagged (NaN) channel drops out of the mean; NaN only if flagged in every station
-        return band_flag(
-            f, np.ma.masked_invalid([d['i'][col] for d in dfs.values()]).mean(axis=0).filled(np.nan)
+        # Station. Solid: beamformed. Dotted: element / 256, i.e. no sky noise correlated between elements.
+        lines = []
+        for n, (s, d) in enumerate(dfs.items()):
+            color = f'C{n}'
+            f, i = d['f_mhz'], d['i']
+            lines += [
+                (f, i['sefd_i_st'], s, {'color': color}),
+                (
+                    f,
+                    i['sefd_i_el'] / N_STATION_ANT,
+                    '256 × uncorrelated elements' if n == 0 else None,
+                    {'color': color, 'ls': ':', 'lw': 1},
+                ),
+            ]
+        lines += senscalc_line() + sys_req_lines(d0['f_mhz'], 'sefd', ARRAYS['AA4'])
+        plot_vs_freq(path('all_sefd_i_st'), UNITS['sefd_i_st'], lines)
+        plot_vs_freq(
+            path('all_sefd_i_st_zoom'),
+            UNITS['sefd_i_st'],
+            lines,
+            frange=ZOOM_ALL_MHZ,
+            ymin=zoom_ylim[0],
+            ymax=zoom_ylim[1],
         )
 
-    aot = station_mean('a_over_t_i_st')
-    sefd = station_mean('sefd_i_st')
-    fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(14, 5))
-    for name, n in ARRAYS.items():
-        ax0.plot(f, aot * n, label=f'{name} ({n})')
-        ax1.plot(f, sefd / n, label=f'{name} ({n})')
-    for ax, kind in ((ax0, 'aot'), (ax1, 'sefd')):
-        for fr, y, label, kw in sys_req_lines(f, kind):
-            ax.plot(fr, band_flag(fr, y), label=label, **kw)
-    ax0.set_ylabel('Array A/T$_I$ [m$^2$ K$^{-1}$]')
-    ax1.set_ylabel('Array SEFD$_I$ [Jy]')
-    for ax, arrays in ((ax0, [aot * n for n in ARRAYS.values()]), (ax1, [sefd / n for n in ARRAYS.values()])):
-        top = robust_top(arrays)
-        if top is not None:
-            ax.set_ylim(top=min(ax.get_ylim()[1], top))
-        ax.set_xlabel('Frequency [MHz]')
-        ax.set_xlim(f.min(), f.max())
-        legend_below(ax, max_cols=3)
-    fig.suptitle(
-        f'Mean of {len(dfs)} beamformed stations (zenith, LST {d0["obs_lst_h"]:.1f} h): {", ".join(dfs)}'
-    )
-    fig.savefig(path('array_sensitivity'), bbox_inches='tight')
-    plt.close(fig)
+        aot_lines = [(d['f_mhz'], d['i']['a_over_t_i_st'], s, {}) for s, d in dfs.items()]
+        if senscalc_table:
+            aot_lines.append(
+                (d0['f_mhz'], TWO_K_JY / np.sqrt(2) / d0['senscalc_sefd_i'], sc_label, {'color': 'k', 'ls': '--'})
+            )
+        aot_lines += sys_req_lines(d0['f_mhz'], 'aot', ARRAYS['AA4'])
+        plot_vs_freq(path('all_a_over_t_i_st'), UNITS['a_over_t_i_st'], aot_lines)
+        # Solid: I. Dashed: V. Dash-dot: Q. Thin solid: U. Dotted: I against the uncorrelated-noise prediction.
+        lines = []
+        for n, (s, d) in enumerate(dfs.items()):
+            color = f'C{n}'
+            f, i = d['f_mhz'], d['i']
+            lines += [
+                (f, i['rho_i'], f'{s} I', {'color': color}),
+                (f, i['rho_q'], f'{s} Q', {'color': color, 'ls': '-.', 'lw': 1}),
+                (f, i['rho_u'], f'{s} U', {'color': color, 'lw': 0.5}),
+                (f, i['rho_v'], f'{s} V', {'color': color, 'ls': '--'}),
+                (f, i['rho_i_unc'], None, {'color': color, 'ls': ':', 'lw': 1}),
+            ]
+        plot_vs_freq(path('all_rho'), r'$\rho$ = measured / predicted noise', lines)
+
+        # Array sensitivity from the station mean, assuming identical 256-antenna beamformed stations
+        f = d0['f_mhz']
+
+        def station_mean(col):
+            # A spike-flagged (NaN) channel drops out of the mean; NaN only if flagged in every station
+            return band_flag(
+                f, np.ma.masked_invalid([d['i'][col] for d in dfs.values()]).mean(axis=0).filled(np.nan)
+            )
+
+        aot = station_mean('a_over_t_i_st')
+        sefd = station_mean('sefd_i_st')
+        fig, (ax0, ax1) = plt.subplots(1, 2, figsize=(14, 5))
+        for name, n in ARRAYS.items():
+            ax0.plot(f, aot * n, label=f'{name} ({n})')
+            ax1.plot(f, sefd / n, label=f'{name} ({n})')
+        for ax, kind in ((ax0, 'aot'), (ax1, 'sefd')):
+            for fr, y, label, kw in sys_req_lines(f, kind):
+                ax.plot(fr, band_flag(fr, y), label=label, **kw)
+        ax0.set_ylabel('Array A/T$_I$ [m$^2$ K$^{-1}$]')
+        ax1.set_ylabel('Array SEFD$_I$ [Jy]')
+        for ax, arrays in ((ax0, [aot * n for n in ARRAYS.values()]), (ax1, [sefd / n for n in ARRAYS.values()])):
+            top = robust_top(arrays)
+            if top is not None:
+                ax.set_ylim(top=min(ax.get_ylim()[1], top))
+            ax.set_xlabel('Frequency [MHz]')
+            ax.set_xlim(f.min(), f.max())
+            legend_below(ax, max_cols=3)
+        fig.suptitle(
+            f'Mean of {len(dfs)} beamformed stations (zenith, LST {d0["obs_lst_h"]:.1f} h): {", ".join(dfs)}'
+        )
+        fig.savefig(path('array_sensitivity'), bbox_inches='tight')
+        plt.close(fig)
+        return ''
+
+    # A failing plot (e.g. on an all-NaN map) is logged and skips the rest of that station's (or the
+    # all-station) plots, rather than stopping the run
+    for s, d in tqdm(dfs.items(), desc='station plots'):
+        guarded(f'{s} plots', lambda s=s, d=d: station_plots(s, d))
+    guarded('All-station plots', all_station_plots)
     logger.info(f'[plot] wrote {len(glob.glob(os.path.join(pdir, "*.png")))} PNGs to {pdir}')
 
 
