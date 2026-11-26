@@ -60,9 +60,11 @@ SCRIPTS = {
     'delay_fit': 'delay_fit_report',
     'holo_suncal': 'holo_suncal',
     'sensitivity': 'station_sensitivity',
+    'diagnose': 'diagnose',
 }
 CALIBRATION = ('calibration', 'holo_suncal')  # Write a calibration run folder in reports/calibration/
 NEEDS_CAL = ('delay_fit', 'sensitivity')  # Read the {station}.cal files of calibration runs
+OPTIONAL_CAL = ('diagnose',)  # Can read a calibration run, if one is picked
 MULTI_CAL = ('delay_fit',)  # Reads several calibration runs, and compares them
 DELAY_CAL = ('sensitivity',)  # Can also read a delay fit run, with its calibration run's amplitudes
 INDENTED = ('delay_fit',)  # Card shown under the Calibration card
@@ -80,6 +82,11 @@ INFO = {
         'Self-holography on the Sun; a run in the calibration summary.',
     ),
     'sensitivity': ('speed', 'Sensitivity', 'SEFD and A/T from difference images; needs two integrations.'),
+    'diagnose': (
+        'troubleshoot',
+        'Diagnose',
+        'Checks every antenna for faults and lists the suspects; a calibration run adds delay checks.',
+    ),
 }
 # Status: badge colour
 STATUS_COLOR = {'done': 'positive', 'running': 'primary', 'queued': 'orange', 'cancelled': 'grey'}
@@ -759,7 +766,7 @@ def _reads(job: Job) -> set[Path]:
 
 def cal_ready(job: Job) -> bool:
     """Whether the calibration runs a job reads are done, and no queued job will rewrite them."""
-    if job.name not in NEEDS_CAL:
+    if job.name not in NEEDS_CAL and not job.caldirs:
         return True
     pending = set().union(*map(_writes, QUEUE))
     return bool(job.caldirs) and all(any(d.glob('*.cal')) for d in job.caldirs) and not _reads(job) & pending
@@ -1251,12 +1258,11 @@ def index():
                             qa_badge = ui.badge().props('rounded text-color=primary')
                         ui.label(desc).classes('text-xs text-grey-7')
                 cal = None
-                if name in NEEDS_CAL:
+                if name in NEEDS_CAL + OPTIONAL_CAL:
                     multi = name in MULTI_CAL
-                    cal = ui.select(
-                        [], label='Calibration runs' if multi else 'Calibration run', multiple=multi
-                    )
-                    cal.classes('w-full').props('use-chips' if multi else '')
+                    label = 'Calibration runs' if multi else 'Calibration run'
+                    cal = ui.select([], label=label + (' (optional)' if name in OPTIONAL_CAL else ''), multiple=multi)
+                    cal.classes('w-full').props('use-chips' if multi else 'clearable' if name in OPTIONAL_CAL else '')
                 run_text = report_btn = log_btn = opts_btn = summary_btn = None
                 if name == 'calibration':
                     # New runs are set up in a dialog; the card lists the runs
@@ -1752,13 +1758,13 @@ def index():
                     sel.set_options(options, value=kept or options)
                 else:
                     sel.set_options(options, value=sel.value if sel.value in options else None)
-            if not sel.multiple and sel.value is None and options:
+            if not sel.multiple and sel.value is None and options and name not in OPTIONAL_CAL:
                 sel.set_value(options[0])
         caldirs = picked_cals(s, c['cal'])
         start_now = ready(Job(s, name, [], 0, d, caldirs))
         # A batch checks each set itself, so it needs only the options and calibration runs
         batch_ok = (
-            script in PARSERS and not missing_required(fields, values) and (c['cal'] is None or bool(caldirs))
+            script in PARSERS and not missing_required(fields, values) and (c['cal'] is None or bool(caldirs) or name in OPTIONAL_CAL)
         )
         enabled = batch_ok and not busy and not reason
         changed = sum(values[f.dest] != v for f, v in zip(fields, default_values(fields).values(), strict=True))

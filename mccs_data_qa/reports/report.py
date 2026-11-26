@@ -33,7 +33,7 @@ from ska_ost_low_uv.utils import get_resource_path
 
 # Report folders under a calibration set's reports/ folder, in the order of the nav bar between them.
 # calibration/ holds a folder per calibration run: one per stefcal option combination, and HOLO_RUN.
-REPORTS = ('quicklook', 'calibration', 'delay_fit', 'sensitivity')
+REPORTS = ('quicklook', 'calibration', 'delay_fit', 'sensitivity', 'diagnose')
 HOLO_RUN = 'sun-holography'
 # Report plots open full size in a modal, so are saved above matplotlib's 100 dpi
 mpl.rcParams['savefig.dpi'] = 150

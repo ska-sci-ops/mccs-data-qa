@@ -3,7 +3,7 @@
 * mccs_data_qa/ (`mccs-spider`): Runs on MCCS server, extracts HDF5 file metadata and creates database.
 * mccs_data_qa/analyse.py (`mccs-analyse`): Builds the analysis workbook (sweep QA, coverage histograms, calibration sets) from `db/latest.csv`.
 * mccs_data_qa/convert_set.py (`mccs-convert-set`): Converts every sweep in a calibration set to UVX, with a `calibration_set.yaml`. `mccs-convert-eb` converts a single EB. Both take `--lossy [STEP]` for quantised (lossy) crosses.
-* mccs_data_qa/reports/ (`mccs-report-ui`): Web UI and scripts for QA reports (quicklook, stefcal, delay fit, Sun holography, sensitivity) on calibration sets.
+* mccs_data_qa/reports/ (`mccs-report-ui`): Web UI and scripts for QA reports (quicklook, stefcal, delay fit, Sun holography, sensitivity, diagnose) on calibration sets.
 * app.py: Runs on scs server, simple Panel app to view the MCCS observation database.
 
 ### Usage
@@ -74,6 +74,16 @@ terminal closes or the server is culled; `nohup mccs-report-ui --root sweeps > r
 keeps it past the terminal.
 
 Each script also runs on its own, e.g. `python -m mccs_data_qa.reports.run_stefcal --help`.
+
+The Diagnose task checks every antenna of a set and reports the ones that look faulty. In daytime data it
+phases the station up on the Sun and finds antennas missing from the aperture; with a calibration run it
+also finds antennas whose phase differs from their neighbours', the sign of an antenna out of position or
+a cable on the wrong input. It compares each baseline's correlation with that of baselines of similar
+length to find swapped polarisations and dead inputs, compares bandpasses across the station, follows
+power and correlation across integrations, and, with a calibration run, looks for poor or outlying delay
+fits. The report lists every failure with its likely cause, shows a pass, warn or fail matrix of all
+antennas, and writes the failures to `issues.csv`. `--freq-idx` sets the channel used for the holography,
+UV distance and time checks.
 
 The Calibration task can also run the MCCS station calibration solver with the SFT's GSM, SUN and
 SUN_FAST settings (`--cal-model mccs-gsm`, `mccs-sun`, `mccs-sunfast`; `--leakage solve` is the

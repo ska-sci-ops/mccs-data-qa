@@ -17,7 +17,13 @@ from pathlib import Path
 
 import numpy as np
 import pylab as plt
-from mccs_data_qa.reports.delay_fit_report import add_fit_args, antenna_positions, delay_fit_report, parse_ref_ant, run_delay_fits
+from mccs_data_qa.reports.delay_fit_report import (
+    add_fit_args,
+    antenna_positions,
+    delay_fit_report,
+    parse_ref_ant,
+    run_delay_fits,
+)
 from loguru import logger
 from mccs_data_qa.reports.report import (
     AA1_GRID,
@@ -38,6 +44,37 @@ from ska_ost_low_uv.postx import ApertureArray
 
 DEFAULT_FREQ_IDX = 192
 MIN_SUN_ALT = 20  # deg; below this the Sun no longer dominates the diffuse sky in every channel
+PHASE_RANGES = (5, 10, 15, 30, 45, 90, 180)  # deg; aperture phase colour scales to choose from
+
+
+def aperture_phase_range(holo_dict: dict, pct: float = 95) -> tuple[float, float]:
+    """A symmetric phase colour scale, in degrees, for the aperture images of `plot_aperture_xy()`.
+
+    The library draws phase on +-180 deg, which leaves a well-calibrated aperture one flat colour. This picks
+    the smallest of PHASE_RANGES that holds the given percentile of |phase| over the pixels the plot shows
+    unmasked (the central 1 / oversample_factor of the image, within 20 dB of each pol's peak), using X and
+    Y together so that the two pols share a scale. A percentile rather than the maximum lets a few bad
+    antennas saturate, and so stand out, instead of widening the scale for every other antenna.
+
+    Args:
+        holo_dict (dict): Output of `run_selfholo()`, with 'aperture_img' and 'oversample_factor'.
+        pct (float): Percentile of |phase| the scale must hold.
+
+    Returns:
+        phs_range (tuple): (-s, s) in degrees; (-180, 180) if no pixel is unmasked.
+    """
+    img = holo_dict['aperture_img'][..., (0, 3)]
+    c, half = img.shape[0] // 2, img.shape[0] // (2 * holo_dict['oversample_factor'])
+    img = img[c - half : c + half + 1, c - half : c + half + 1]
+    with np.errstate(divide='ignore'):
+        db = 10 * np.log10(np.abs(img))
+    shown = db >= db.max(axis=(0, 1)) - 20  # plot_aperture() masks phase below -20 dB
+    if not shown.any():
+        return (-180, 180)
+    # ponytail: the 95th percentile is a heuristic knob; raise pct if real phase errors are clipped
+    p = np.percentile(np.abs(np.angle(img[shown], deg=True)), pct)
+    s = next((r for r in PHASE_RANGES if r >= p), 180)
+    return (-s, s)
 
 
 def _holo_sweep(
@@ -120,7 +157,7 @@ def _plot_apertures(fn: str, cal_paths: dict, freq_idx: int, plotdir: Path, igno
     for label, cal in {'uncalibrated': None, **cals}.items():
         aa.set_cal(cal)
         holo.run_selfholo(vis='data' if cal is None else 'cal')
-        holo.plot_aperture_xy(show_flags=True)
+        holo.plot_aperture_xy(show_flags=True, phs_range=aperture_phase_range(holo.holo_dict))
         plt.suptitle(f'{aa.name} aperture illumination, {f_mhz:.1f} MHz, {label}')
         stem = f'{aa.name}_aperture_{label.replace(" ", "_")}'
         plt.savefig(plotdir / f'{stem}.png', bbox_inches='tight')
@@ -220,9 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Keep existing {station}.cal files in the run folder instead of recalibrating',
     )
-    io.add_argument(
-        '--freq-idx', type=int, default=DEFAULT_FREQ_IDX, help='Channel index for the aperture images'
-    )
+    io.add_argument('--freq-idx', type=int, default=DEFAULT_FREQ_IDX, help='Channel index for the aperture images')
     add_fit_args(p)
     return p
 
