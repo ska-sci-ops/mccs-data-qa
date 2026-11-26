@@ -1432,11 +1432,12 @@ def index():
                 ui.label(f'Sets in {s.parent.name}/').classes('eyebrow grow')
                 ui.button('All', on_click=lambda: tick_all(True)).props('flat dense no-caps')
                 ui.button('None', on_click=lambda: tick_all(False)).props('flat dense no-caps')
-            with ui.scroll_area().classes('w-full h-80 border rounded'):
+            # Tall list with tight rows, so many sets fit on screen at once
+            with ui.scroll_area().classes('w-full h-[65vh] border rounded'), ui.column().classes('w-full gap-0'):
                 for p, (reason, overwrites) in zip(sets, states, strict=True):
                     with ui.row().classes('w-full items-center no-wrap gap-2'):
                         box = ui.checkbox(p.name, value=not reason and not overwrites, on_change=lambda: count())
-                        box.set_enabled(not reason)
+                        box.props('dense').set_enabled(not reason)
                         if not reason:
                             boxes[p] = box
                         note = reason or ('re-run (overwrites)' if overwrites else '')
