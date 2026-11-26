@@ -20,8 +20,6 @@ import pylab as plt
 from loguru import logger
 from mccs_data_qa.reports.report import (
     AA1_GRID,
-    AA1_GRID_COLS,
-    AA1_GRID_ROWS,
     DEFAULT_SIGMA_THR,
     args_table,
     bad_channel_times,
@@ -35,6 +33,7 @@ from mccs_data_qa.reports.report import (
     obs_start,
     read_station,
     station_cal_model,
+    station_grid,
     suncal_kwargs_from_args,
     table,
     write_report,
@@ -126,10 +125,11 @@ def _nanmean(arrays: list) -> np.ndarray:
 
 
 def _plot_antenna_flags(aas: dict, bad_stations: list[str], outdir: Path) -> str:
-    plt.figure(figsize=(AA1_GRID_COLS * 3, AA1_GRID_ROWS * 3))
+    grid, rows, cols = station_grid(aas)
+    plt.figure(figsize=(cols * 3, rows * 3))
     for name, aa in aas.items():
         title = name if name not in bad_stations else f'{name} (cal fail)'
-        aa.plotting.plot_antennas(flags=aa.cal, subplot_id=AA1_GRID[name], reuse_fig=True, title=title)
+        aa.plotting.plot_antennas(flags=aa.cal, subplot_id=grid[name], reuse_fig=True, title=title)
     plt.tight_layout()
     fn = 'antenna_flags.png'
     plt.savefig(outdir / fn)
@@ -138,10 +138,11 @@ def _plot_antenna_flags(aas: dict, bad_stations: list[str], outdir: Path) -> str
 
 
 def _plot_corr_matrices(aas: dict, bad_stations: list[str], outdir: Path) -> str:
-    plt.figure(figsize=(AA1_GRID_COLS * 3, AA1_GRID_ROWS * 2.3))
+    grid, rows, cols = station_grid(aas)
+    plt.figure(figsize=(cols * 3, rows * 2.3))
     for name, aa in aas.items():
         title = name if name not in bad_stations else f'{name} (cal fail)'
-        aa.plotting.plot_corr_matrix(subplot_id=AA1_GRID[name], reuse_fig=True, title=title)
+        aa.plotting.plot_corr_matrix(subplot_id=grid[name], reuse_fig=True, title=title)
     plt.tight_layout()
     fn = 'corr_matrix.png'
     plt.savefig(outdir / fn)
@@ -164,7 +165,8 @@ def _plot_uvdist(aas: dict, bad_stations: list[str], outdir: Path) -> list[str]:
 
 def _plot_allsky_images(aas: dict, bad_stations: list[str], outdir: Path, vis: str = 'cal') -> tuple[dict, str]:
     """Grid of per-station all-sky images from the 'cal' or uncalibrated 'data' visibilities."""
-    plt.figure(figsize=(AA1_GRID_COLS * 3, AA1_GRID_ROWS * 3))
+    grid, rows, cols = station_grid(aas)
+    plt.figure(figsize=(cols * 3, rows * 3))
     imgs = {}
     for name, aa in aas.items():
         img = aa.imaging.make_image(vis=vis)
@@ -173,7 +175,7 @@ def _plot_allsky_images(aas: dict, bad_stations: list[str], outdir: Path, vis: s
             img,
             mode='stokes',
             reuse_fig=True,
-            subplot_id=AA1_GRID[name],
+            subplot_id=grid[name],
             title=title,
             colorbar=True,
         )
@@ -194,7 +196,8 @@ def _plot_frac_diff(
     label: str,
     outdir: Path,
 ) -> str:
-    plt.figure(figsize=(AA1_GRID_COLS * 3, AA1_GRID_ROWS * 3))
+    grid, rows, cols = station_grid(aas)
+    plt.figure(figsize=(cols * 3, rows * 3))
     for name, aa in aas.items():
         img_norm = (imgs[name] - img_avg) / img_avg
         title = name if name not in bad_stations else f'{name} (excluded)'
@@ -206,7 +209,7 @@ def _plot_frac_diff(
             clim=(-0.5, 0.5),
             overlay_alpha=0.8,
             reuse_fig=True,
-            subplot_id=AA1_GRID[name],
+            subplot_id=grid[name],
             pol_idx=pol_idx,
             overlay_coords='altaz',
         )

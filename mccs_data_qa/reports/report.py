@@ -192,6 +192,18 @@ def station_key(name: str) -> list:
     return [int(t) if t.isdigit() else t for t in re.split(r'(\d+)', name)]
 
 
+def station_grid(names) -> tuple[dict, int, int]:
+    """Subplot (rows, cols, index) per station, plus the grid's rows and cols.
+
+    5+ stations use the fixed AA1 3x6 layout; fewer use a compact 1x2 (1-2 stations) or 2x2 grid in station order.
+    """
+    names = sorted(names, key=station_key)
+    if len(names) >= 5:
+        return {n: AA1_GRID[n] for n in names}, AA1_GRID_ROWS, AA1_GRID_COLS
+    rows, cols = (1, 2) if len(names) <= 2 else (2, 2)
+    return {n: (rows, cols, i) for i, n in enumerate(names, 1)}, rows, cols
+
+
 def parse_stations(s: str) -> set[str] | None:
     """Station names from --stations, e.g. 's8-1, s8-2' or 's8-1 s8-2'; None for 'all' or empty."""
     names = set(re.split(r'[,\s]+', s.strip())) - {''}

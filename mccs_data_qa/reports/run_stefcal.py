@@ -24,8 +24,6 @@ from loguru import logger
 from mccs_data_qa.reports.mccs_cal import MCCS_CAL, eep_missing
 from mccs_data_qa.reports.report import (
     AA1_GRID,
-    AA1_GRID_COLS,
-    AA1_GRID_ROWS,
     DEFAULT_SIGMA_THR,
     args_table,
     base_parser,
@@ -41,6 +39,7 @@ from mccs_data_qa.reports.report import (
     parse_flag_freqs,
     read_station,
     station_cal_model,
+    station_grid,
     station_key,
     suncal_kwargs_from_args,
     table,
@@ -180,9 +179,10 @@ def _calibrate_sweep(
 
 def _plot_gains_vs_freq(cals: dict, outdir: Path, plot_type: str = 'mag') -> str:
     """Grid of per-station gain magnitude or phase against frequency, XX and YY, one line per antenna."""
-    plt.figure(figsize=(AA1_GRID_COLS * 3, AA1_GRID_ROWS * 2.5))
+    grid, rows, cols = station_grid(cals)
+    plt.figure(figsize=(cols * 3, rows * 2.5))
     for name, cal in cals.items():
-        plt.subplot(*AA1_GRID[name])
+        plt.subplot(*grid[name])
         f_mhz = cal.gains.frequency.values / 1e6
         # Diagonal terms: XX, YY for a full-Jones cal, X, Y for a diagonal one; flagged set to NaN
         bad = (
@@ -400,10 +400,10 @@ def _station_curve(cal, kind: str) -> np.ndarray | None:
 
 def _plot_runs_vs_freq(runs: dict, outdir: Path, kind: str) -> str:
     """Grid of per-station curves from `_station_curve()` against frequency, one line per run."""
-    plt.figure(figsize=(AA1_GRID_COLS * 3, AA1_GRID_ROWS * 2.5))
-    stations = sorted({s for cals in runs.values() for s in cals}, key=list(AA1_GRID).index)
-    for name in stations:
-        plt.subplot(*AA1_GRID[name])
+    grid, rows, cols = station_grid({s for cals in runs.values() for s in cals})
+    plt.figure(figsize=(cols * 3, rows * 2.5))
+    for name in grid:
+        plt.subplot(*grid[name])
         for i, (run, cals) in enumerate(runs.items()):
             y = _station_curve(cals[name], kind) if name in cals else None
             if y is not None:
