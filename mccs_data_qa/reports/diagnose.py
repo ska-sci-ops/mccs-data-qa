@@ -357,10 +357,15 @@ def check_holography(aa, ants, ant_flags, cal_ok, thr, lim, plotdir):
     holo.run_selfholo(vis='cal')
     holo.plot_aperture_xy(show_flags=True, phs_range=aperture_phase_range(holo.holo_dict))
     e, n = aa.xyz_enu[:, 0], -aa.xyz_enu[:, 1]  # The (E, -N) axes of holography.plot_aperture
+    # Hollow, labelled marks, so that whatever the image shows at the antenna stays visible
+    marks = {'missing': (missing, 's', 'cyan'), 'phase': (odd, 'D', 'magenta')}
     for ax in plt.gcf().axes:
-        if ax.images:
-            ax.scatter(e[missing], n[missing], marker='x', s=60, c='cyan', label='missing')
-            ax.scatter(e[odd], n[odd], marker='o', s=80, facecolors='none', edgecolors='magenta', label='phase')
+        if not ax.images:
+            continue
+        for label, (sel, marker, color) in marks.items():
+            ax.scatter(e[sel], n[sel], marker=marker, s=90, facecolors='none', edgecolors=color, lw=1.2, label=label)
+            for a in np.flatnonzero(sel):
+                ax.annotate(ants[a], (e[a], n[a]), xytext=(5, 5), textcoords='offset points', fontsize=6, color=color)
     if missing.any() or odd.any():
         plt.gcf().axes[0].legend(loc='upper right', fontsize=7)
     f_mhz = aa.f[aa.idx['f']].to_value('MHz')
@@ -369,8 +374,9 @@ def check_holography(aa, ants, ant_flags, cal_ok, thr, lim, plotdir):
     stem = _save(aa.name, plotdir, 'aperture')
     aa.set_cal(orig_cal)
     caption = (
-        f'{aa.name}. Cyan crosses mark missing antennas, magenta circles antennas whose phase differs from '
-        "their neighbours', and red circles antennas flagged in the station configuration or the calibration."
+        f'{aa.name}. Cyan squares mark missing antennas and magenta diamonds antennas whose phase differs from '
+        "their neighbours', each labelled with its name; red circles mark antennas flagged in the station "
+        'configuration or the calibration.'
     )
     return out, [(stem, caption)]
 
