@@ -38,8 +38,15 @@ def convert(daq_dir, eb_id, out_dir, n_expected, quantise=None):
     from ska_ost_low_uv.io import hdf5_sweep_to_uvx, get_hdf5_metadata
 
     dirpath = get_eb(daq_dir, eb_id, n_expected)
-    md = get_hdf5_metadata(glob.glob(f"{dirpath}/correlation*.hdf5")[0])
-    station_id = md['station_id'].lower()
+    # station ID from the first readable file: hdf5_sweep_to_uvx skips unreadable channels, so must we
+    for fn in sorted(glob.glob(f"{dirpath}/correlation*.hdf5")):
+        try:
+            station_id = get_hdf5_metadata(fn)['station_id'].lower()
+            break
+        except (AttributeError, IndexError, KeyError, OSError):
+            continue
+    else:
+        raise RuntimeError(f"No readable correlation files in {dirpath}")
     fn_out = f"{out_dir}/{eb_id}_{station_id}_sweep.uvx"
     # pattern: EB dirs can hold other DAQ HDF5 files (no 'root' group) alongside the correlation files
     hdf5_sweep_to_uvx(dirpath, fn_out, telescope_name=station_id, pattern='correlation*',
