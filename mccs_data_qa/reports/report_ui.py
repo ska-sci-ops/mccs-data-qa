@@ -2180,7 +2180,10 @@ async def sets_page():
             return
         first = view['mtime'] is None
         view['mtime'] = mtime
-        new, det = await run.io_bound(load_sets, xlsx, root)
+        try:
+            new, det = await run.io_bound(load_sets, xlsx, root)
+        finally:
+            grid.run_grid_method('setGridOption', 'loading', False)  # Don't leave the overlay up on a bad workbook
         rows[:] = new
         details.clear()
         details.update(det)
@@ -2412,6 +2415,8 @@ async def sets_page():
             {
                 'columnDefs': set_columns(),
                 'rowData': rows,
+                # Loading overlay until reload_if_new() fills the rows; with no workbook there is nothing to load
+                'loading': xlsx.exists(),
                 'defaultColDef': {
                     'sortable': True,
                     'resizable': True,
