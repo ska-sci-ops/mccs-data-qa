@@ -59,3 +59,12 @@ def test_n_expected_accepts_comma_separated_list():
     assert parse_n_expected(385) == [385]
     assert parse_n_expected(None) == parse_n_expected('') == []
     assert build_parser().parse_args(['1']).n_expected == '321,385'
+
+
+def test_missing_eb_names_the_path(tmp_path):
+    import pytest
+
+    from mccs_data_qa.convert_set import get_eb
+
+    with pytest.raises(FileNotFoundError, match='EB not found: .*eb-missing/ska-low-mccs'):
+        get_eb(str(tmp_path), 'eb-missing', None)

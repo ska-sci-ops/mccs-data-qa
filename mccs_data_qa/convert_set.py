@@ -18,7 +18,10 @@ def parse_n_expected(n_expected):
 
 def get_eb(daq_dir, eb_id, n_expected):
     """ Returns the path to the directory for a given eb_id; n_expected is a count or comma-separated counts. """
-    dirpath = glob.glob(f"{daq_dir}/{eb_id}/ska-low-mccs/*")[0]
+    dirs = glob.glob(f"{daq_dir}/{eb_id}/ska-low-mccs/*")
+    if not dirs:
+        raise FileNotFoundError(f"EB not found: {daq_dir}/{eb_id}/ska-low-mccs/*")
+    dirpath = dirs[0]
     # some EBs keep the files in a correlator_data subdirectory
     if os.path.isdir(f"{dirpath}/correlator_data"):
         dirpath = f"{dirpath}/correlator_data"
