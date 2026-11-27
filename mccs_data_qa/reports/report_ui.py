@@ -1146,6 +1146,24 @@ def index():
                 for st in set_stations(set_of(d)):
                     mark_row(st, choices, marks.get(st, {}), lambda status, note, st=st: save(st, status, note))
 
+    async def show_set_table():
+        """Open the folder table, its rows read fresh from the sets' yaml (slow for many sets, so in a thread)."""
+        d = STATE['dir']
+        set_table_title.set_text(f'Sets in {d.name or d}')
+        set_table.options.update(rowData=[], loading=True)
+        set_table.update()
+        set_table_dialog.open()
+        sets = [p for p in d.iterdir() if (p / SET_YAML).exists()] if d.is_dir() else []
+        rows = await run.io_bound(lambda: [folder_set_row(p) for p in sets])
+        set_table.options.update(rowData=rows, loading=False)
+        set_table.update()
+
+    def open_from_table(e):
+        row = e.args.get('data') or {}
+        if row.get('folder'):
+            set_table_dialog.close()
+            browse(Path(row['folder']))
+
     @ui.refreshable
     def folder():
         d = STATE['dir']
@@ -1153,6 +1171,9 @@ def index():
             ui.button(icon='arrow_upward', on_click=lambda: browse(d.parent)).props('flat dense').tooltip('Up')
             ui.input('Folder', value=str(d)).classes('grow').on(
                 'keydown.enter', lambda e: browse(Path(e.sender.value).expanduser())
+            )
+            ui.button(icon='table_view', on_click=show_set_table).props('flat dense').tooltip(
+                'Show the sets in this folder as a table'
             )
         if not d.is_dir():
             ui.label('Not a folder').classes('text-negative')
@@ -1882,6 +1903,16 @@ def index():
             'flat no-caps color=white'
         ).tooltip('Browse, convert and update the calibration sets')
         reviewer_chip()
+    ui.add_head_html(SETS_CSS)
+    with ui.dialog() as set_table_dialog, ui.card().style('width: min(900px, 95vw); max-width: none'):
+        with ui.row().classes('w-full items-center no-wrap'):
+            set_table_title = ui.label().classes('text-subtitle1 grow')
+            ui.button(icon='close', on_click=set_table_dialog.close).props('flat dense round')
+        set_table = ui.aggrid(
+            {**GRID_OPTIONS, 'columnDefs': folder_columns(), 'rowData': [], ':getRowId': 'p => p.data.folder'},
+            auto_size_columns=False,
+        ).classes('sets-grid w-full').style('height: 70vh')
+        set_table.on('cellClicked', open_from_table)
     with ui.left_drawer(value=True, bordered=True).props('width=360') as drawer:
         folder()
     with ui.splitter(value=34).classes('w-full') as splitter:
@@ -2002,6 +2033,7 @@ QA_JS = f"""p => {{
 }}"""
 STATUS_JS = f"""p => {_chip("p.value === 'FAILED' ? '#FFE3E4' : '#E3F5EA'", 'p.value')}"""
 DAY_JS = """p => p.value ? `<span class="sets-icons"><span class="material-icons">${p.value === 'Day' ? 'wb_sunny' : 'bedtime'}</span>${p.value}</span>` : ''"""
+DAY_ICON_JS = """p => p.value ? `<span class="sets-icons" title="${p.value}"><span class="material-icons">${p.value === 'Day' ? 'wb_sunny' : 'bedtime'}</span></span>` : ''"""
 REPORTS_JS = f"""p => {{
   const info = {json.dumps({n: [INFO[n][0], INFO[n][1]] for n in INFO})};
   const v = p.value || [];
@@ -2012,6 +2044,14 @@ TIME_JS = "p => p.value ? p.value.slice(11, 16) : ''"
 # Date filter on ISO strings: compare their date part with the picked local midnight
 DATE_FILTER = """{comparator: (f, v) => { if (!v) return -1; const d = new Date(v.slice(0, 10) + 'T00:00:00');
   return d < f ? -1 : d > f ? 1 : 0; }, buttons: ['clear'], inRangeInclusive: true}"""
+
+
+# AG Grid options shared by the sets grid and the folder table
+GRID_OPTIONS = {
+    'defaultColDef': {'sortable': True, 'resizable': True, 'suppressHeaderMenuButton': True},
+    'tooltipShowDelay': 300,
+    'animateRows': False,
+}
 
 
 def set_columns() -> list[dict]:
@@ -2050,6 +2090,26 @@ def set_columns() -> list[dict]:
         {'field': 'n_failed', 'headerName': 'Failed', 'width': 95, **num},
         {'field': 'failed_stations', 'headerName': 'Failed stations', 'flex': 1, 'minWidth': 140,
          'tooltipField': 'failed_stations'},
+    ]
+
+
+def folder_columns() -> list[dict]:
+    """Columns of the folder table: the set folder, then the sets grid's QA, reports, LST and Obs columns."""
+    # Sort only: no filters in this stripped-back table
+    cols = {c['field']: c | {'filter': False} for c in set_columns()}
+    return [
+        {'field': 'name', 'headerName': 'Set', 'flex': 1, 'minWidth': 190, 'sort': 'desc'},
+        cols['qa'],
+        cols['reports'],
+        cols['lst'],
+        {
+            'field': 'day',
+            'headerName': '',
+            'width': 60,
+            'headerTooltip': 'Day or night (AWST)',
+            ':cellRenderer': DAY_ICON_JS,
+        },
+        cols['n_obs'],
     ]
 
 
@@ -2126,6 +2186,23 @@ def set_row_state(row: dict, existing: set[str]) -> dict:
         st['qa_tip'] = tip or 'Not reviewed yet: click to open the set and mark it'
         st['reports'] = [n for n in SCRIPTS if (run_dir(d, n) / 'index.html').exists()]
     return st
+
+
+def folder_set_row(p: Path) -> dict:
+    """Folder table row of a converted set, from its folder and calibration_set.yaml."""
+    meta = read_set(p)
+    details = meta.get('set_details') or []
+    days = {d.get('Day/Night (AWST)') for d in details} - {None}  # As is_daytime(), without re-reading the yaml
+    set_id = meta.get('set_id')
+    st = set_row_state({'folder': str(p)}, {p.name})
+    return {
+        'name': p.name,
+        'folder': str(p),
+        **{k: st[k] for k in ('qa', 'qa_tip', 'reports')},
+        'lst': set_id % 1000 / 10 if isinstance(set_id, int) else None,  # Set ID = yyyymmdd * 1000 + LST in 0.1 hr
+        'day': ('Day' if 'Day' in days else 'Night') if days else '',
+        'n_obs': len(details),
+    }
 
 
 def script_argv(fields: list[Field], values: dict) -> list[str]:
@@ -2430,21 +2507,15 @@ async def sets_page():
                 'rowData': rows,
                 # Loading overlay until reload_if_new() fills the rows; with no workbook there is nothing to load
                 'loading': xlsx.exists(),
-                'defaultColDef': {
-                    'sortable': True,
-                    'resizable': True,
-                    'filter': 'agTextColumnFilter',
-                    'floatingFilter': True,
-                    'suppressHeaderMenuButton': True,
-                },
+                **GRID_OPTIONS,
+                'defaultColDef': GRID_OPTIONS['defaultColDef']
+                | {'filter': 'agTextColumnFilter', 'floatingFilter': True},
                 ':getRowId': 'p => String(p.data.set_id)',
                 ':rowClassRules': "{'sets-failed': p => p.data.status === 'FAILED'}",
                 'rowSelection': {'mode': 'singleRow', 'checkboxes': False, 'enableClickSelection': True},
                 'pagination': True,
                 'paginationPageSize': 50,
                 'paginationPageSizeSelector': [25, 50, 100, 500],
-                'tooltipShowDelay': 300,
-                'animateRows': False,
             },
             auto_size_columns=False,
         ).classes('sets-grid w-full').style('height: 62vh')
