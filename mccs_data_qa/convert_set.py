@@ -38,7 +38,8 @@ def convert(daq_dir, eb_id, out_dir, n_expected, quantise=None):
     md = get_hdf5_metadata(glob.glob(f"{dirpath}/correlation*.hdf5")[0])
     station_id = md['station_id'].lower()
     fn_out = f"{out_dir}/{eb_id}_{station_id}_sweep.uvx"
-    hdf5_sweep_to_uvx(dirpath, fn_out, telescope_name=station_id,
+    # pattern: EB dirs can hold other DAQ HDF5 files (no 'root' group) alongside the correlation files
+    hdf5_sweep_to_uvx(dirpath, fn_out, telescope_name=station_id, pattern='correlation*',
                       quantise=quantise, return_uvx=False)
     return station_id, fn_out
 
