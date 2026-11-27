@@ -1169,14 +1169,16 @@ def index():
                 with ui.item(on_click=lambda p=p: browse(p)).classes(
                     'skao-selected' if p == STATE['set'] else ''
                 ):
-                    with ui.item_section().props('avatar'):
+                    # Quasar's 56px avatar column leaves too little room for the name beside 5 report icons
+                    with ui.item_section().props('avatar').style('min-width: 36px'):
                         if is_set:
                             qa = set_qa(p)
                             ui.icon('dataset', color=qa_color(qa)).tooltip(f'Set QA: {qa.replace("_", " ")}')
                         else:
                             ui.icon('folder', color='grey')
                     with ui.item_section():
-                        ui.label(p.name)
+                        # Truncate rather than run under the report icons
+                        ui.label(p.name).classes('ellipsis').tooltip(p.name)
                     done = [n for n in SCRIPTS if (run_dir(p, n) / 'index.html').exists()] if is_set else []
                     if done:
                         with ui.item_section().props('side'), ui.row().classes('gap-1 no-wrap'):
