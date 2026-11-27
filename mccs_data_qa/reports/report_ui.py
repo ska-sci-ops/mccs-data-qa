@@ -6,9 +6,9 @@ station), pick a set to see its yaml, and run reports on it. Each report is writ
 Sun holography) goes in its own folder `<set>/reports/calibration/<run>/`, with the `{station}.cal` files
 that the delay fit and sensitivity reports read; `reports/calibration/index.html` compares the runs. Delay
 fit and sensitivity read the runs picked on their cards. Runs one report at a time; others wait in a queue
-shared across sets, managed in the Queue tab. Quicklooks go to the front of the queue.
+shared across sets, managed from the Queue button in the header. Quicklooks go to the front of the queue.
 
-The Calibration sets page (`sets/`) lists every set in `<db>/calibration_sets.xlsx`, converts a set into
+The Calibration browser page (`sets/`) lists every set in `<db>/calibration_sets.xlsx`, converts a set into
 `--root` with mccs-convert-set, and updates the database (mccs-spider, then mccs-analyse). These run in their own
 queue, one at a time, alongside the reports.
 
@@ -118,7 +118,7 @@ CHOICE_LABELS = {
 }
 ANSI = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
 LOG_TAIL = 3000  # Lines of a finished run's log shown
-N_RECENT = 20  # Finished runs listed in the Queue tab
+N_RECENT = 20  # Finished runs listed in the Queue menu
 SET_QA = ('healthy', 'mostly_healthy', 'degraded', 'fail')
 STATION_QA = ('healthy', 'mostly_healthy', 'degraded', 'fail')  # Per station, in a quicklook
 CAL_QA = ('pass', 'fail')  # Per station, in a calibration run
@@ -1671,6 +1671,10 @@ def index():
         else:
             ui.notify(f'Queued {run_label(d)} at position {queued(d)}')
 
+    def show_from_queue(r: Run):
+        view['queue_menu'].close()  # Else the menu covers the log it opened
+        show(r)
+
     @ui.refreshable
     def queue_view():
         live = [r for r in RUNS.values() if r.live]
@@ -1686,7 +1690,7 @@ def index():
             with ui.row().classes('w-full items-center no-wrap'):
                 ui.label(run_label(r.dir)).classes('grow')
                 view['live_rows'].append((r, ui.label().classes('text-xs text-grey-7')))
-                ui.button(icon='visibility', on_click=lambda r=r: show(r)).props('flat dense').tooltip(
+                ui.button(icon='visibility', on_click=lambda r=r: show_from_queue(r)).props('flat dense').tooltip(
                     'Show log'
                 )
                 ui.button(icon='stop', color='negative', on_click=lambda r=r: cancel_run(r)).props(
@@ -1735,7 +1739,9 @@ def index():
                 ui.badge(r.status, color=STATUS_COLOR.get(r.status, 'negative')).props('rounded')
                 peak = f', peak {gib(r.peak_rss)}' if r.peak_rss else ''
                 ui.label(f'{r.elapsed}{peak}, {ago(r.finished or r.started)}').classes('text-xs text-grey-7')
-                ui.button(icon='visibility', on_click=lambda r=r: show(r)).props('flat dense').tooltip('Show')
+                ui.button(icon='visibility', on_click=lambda r=r: show_from_queue(r)).props('flat dense').tooltip(
+                    'Show'
+                )
 
     def update_card(s: Path, name: str, c: dict):
         d = card_dir(name)
@@ -1815,6 +1821,9 @@ def index():
         if q != view['queue']:
             view['queue'] = q
             queue_view.refresh()
+            n = len(QUEUE) + len(q[1])
+            view['queue_badge'].set_text(str(n))
+            view['queue_badge'].set_visibility(n > 0)
         used, limit = memory_use()
         set_text(view['mem'], f'Memory {gib(used)} of {gib(limit)}')
         for lr, lbl in view['live_rows']:
@@ -1864,7 +1873,12 @@ def index():
         brand('SKA-Low UV reports')
         set_title = ui.label().classes('text-subtitle1 opacity-80')
         ui.space()
-        ui.button('Calibration sets', icon='table_view', on_click=lambda: ui.navigate.to('sets/')).props(
+        with ui.button('Queue', icon='queue').props('flat no-caps color=white'):
+            view['queue_badge'] = ui.badge(color='accent').props('floating rounded')
+            ui.tooltip('Running, queued and recently completed reports')
+            with ui.menu().classes('p-4').style('width: 640px; max-width: 95vw') as view['queue_menu']:
+                queue_view()
+        ui.button('Calibration browser', icon='table_view', on_click=lambda: ui.navigate.to('sets/')).props(
             'flat no-caps color=white'
         ).tooltip('Browse, convert and update the calibration sets')
         reviewer_chip()
@@ -1898,7 +1912,6 @@ def index():
                 t_log = ui.tab('Log')
                 t_report = ui.tab('Report')
                 t_files = ui.tab('Files')
-                t_queue = ui.tab('Queue')
             with ui.tab_panels(tabs, value=t_set).classes('w-full'):
                 with ui.tab_panel(t_set):
                     set_info()
@@ -1914,15 +1927,13 @@ def index():
                     report()
                 with ui.tab_panel(t_files):
                     files()
-                with ui.tab_panel(t_queue):
-                    queue_view()
     pick_options()
     ui.timer(0.3, tick)
     if view['run']:
         show(view['run'])
 
 
-# --- Calibration sets page: browse calibration_sets.xlsx, convert sets, update the database ----------------
+# --- Calibration browser page: browse calibration_sets.xlsx, convert sets, update the database ----------------
 
 # calibration_sets.xlsx 'Calibration Sets' column: grid field
 SET_FIELDS = {
@@ -2144,7 +2155,7 @@ def tool_status(r: Run) -> tuple[str, str]:
 
 @ui.page('/sets/')
 async def sets_page():
-    """Calibration sets: a grid of calibration_sets.xlsx with a Convert button per set, and the database update."""
+    """Calibration browser: a grid of calibration_sets.xlsx with a Convert button per set, and the database update."""
     root, db = STATE['root'], STATE['db']
     xlsx = db / 'calibration_sets.xlsx'
     # Filled by reload_if_new() once the page is sent: reading the workbook can outlast the page's 3 s response_timeout
@@ -2361,7 +2372,7 @@ async def sets_page():
             'Back to the reports'
         )
         brand('SKA-Low UV reports')
-        ui.label('Calibration sets').classes('text-subtitle1 opacity-80')
+        ui.label('Calibration browser').classes('text-subtitle1 opacity-80')
         ui.space()
         reviewer_chip()
 

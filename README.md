@@ -53,7 +53,7 @@ Or convert from the UI: start it with the database folder (and the DAQ folder, i
 mccs-report-ui --root sweeps --db db [--daq-dir /home/jovyan/daq-data]
 ```
 
-then open **Calibration sets** in the header. It lists every set in `db/calibration_sets.xlsx`, with
+then open **Calibration browser** in the header. It lists every set in `db/calibration_sets.xlsx`, with
 per-column filters, a search box, CSV export, the set QA marked in the report UI, and a Convert button per
 row. Conversions go into `--root` with the Convert options. **Update database** runs `mccs-spider --analyse`
 (spider, then `mccs-analyse`, then the acacia upload, which a switch can turn off) and reloads the table.
