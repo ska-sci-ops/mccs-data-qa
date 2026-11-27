@@ -13,7 +13,7 @@ def _sweeps() -> pd.DataFrame:
     rows = [
         {'Observation ID': f'eb-{i}', 'Station ID': st, 'Mode': 'correlator', 'Sub-mode': 'sweep',
          'UTC Start': '2026-07-29 02:46:00', 'LST start (hr)': 7.0, 'n_files': 385, 'size_mb': 1.0,
-         'pb-id': 'pb-1', 'n_channel': 1, 'Duration (s)': 760.0, 'error': ''}
+         'pb-id': 'pb-1', 'n_channel': 1, 'Duration (s)': 760.0, 'error': '', 'on_disk': True}
         for i, st in enumerate(('s8-1', 's9-2'))
     ]
     return add_derived(pd.DataFrame(rows))
@@ -29,7 +29,7 @@ def test_sets_page_reads_analyse_workbook(tmp_path):
     # Every grid column is filled from the workbook or the row state
     assert {c['field'] for c in set_columns()} <= set(row)
     assert row['folder'] == set_folder(tmp_path, 20260729070, '2026-07-29') == f'{tmp_path}/set_2026-07-29_070'
-    assert (row['action'], row['qa'], row['status']) == ('convert', '', 'OK')
+    assert (row['action'], row['qa'], row['status'], row['on_disk']) == ('convert', '', 'OK', 2)
     assert [o['Station ID'] for o in details[20260729070]] == ['s8-1', 's9-2']
 
     # Once converted, the row offers a re-convert and shows the set as unreviewed

@@ -20,9 +20,6 @@ from loguru import logger
 # Map of all station IDs
 from .station_ids import sid_map
 
-# Setup logger
-logger.remove(0)
-logger.add(sys.stderr, format="<level>{level}</level> | {message}", level="INFO")
 
 # Set SKA-Low Earth Location
 eloc = EarthLocation(x=-2561290.83467119, y=5085918.51537833, z=-2864050.87177975, unit='m')
@@ -347,7 +344,16 @@ def _process_obs(obs: str) -> list:
 ## Main loop
 ##############
 
-def run_spider(datapath: str, outdir: str='db', skip_existing: bool=True, max_workers: int=8):
+def obs_paths(df: pd.DataFrame, datapath: str) -> list:
+    """ Folder of each row's files: <datapath>/<obs_id>/ska-low-mccs/<pb-id>, or the EB's ska-low-mccs
+    folder for rows spidered before pb-id was recorded. """
+    pbs = df['pb-id'] if 'pb-id' in df else [None] * len(df)
+    return [os.path.join(datapath, str(obs), 'ska-low-mccs', str(pb) if pd.notna(pb) and str(pb) else '')
+            for obs, pb in zip(df['Observation ID'], pbs)]
+
+
+def run_spider(datapath: str, outdir: str='db', skip_existing: bool=True, max_workers: int=8,
+               check_only: bool=False):
     """ Run the spider script to create a CSV file.
 
     Loops through execution block directories in datapath.
@@ -362,8 +368,12 @@ def run_spider(datapath: str, outdir: str='db', skip_existing: bool=True, max_wo
                      The per-observation work is I/O-bound (HDF5/YAML reads,
                      stat calls), so a thread pool overlaps that I/O instead
                      of processing one folder at a time. Defaults to 8.
+        check_only: If True, spider no new folders: only re-check which rows of
+                    latest.csv are still on disk (the on_disk column, which every
+                    run refreshes) and re-save.
     """
-    logger.info(f"Spidering {datapath}...")
+    skip_existing = skip_existing or check_only  # The check needs latest.csv's rows
+    logger.info(f"{'Checking files in' if check_only else 'Spidering'} {datapath}...")
     # Match both the old eb-t<date>-<seq> folders and the newer
     # short-alphanumeric eb-<id> folders (e.g. eb-18jjem39q2h9).
     obslist = sorted(glob.glob(f"{datapath}/eb-*"))
@@ -408,7 +418,7 @@ def run_spider(datapath: str, outdir: str='db', skip_existing: bool=True, max_wo
     # Filter out already-spidered folders up front (this is what actually
     # keeps a daily incremental run fast -- everything below only ever runs
     # against the handful of new folders, not the whole archive).
-    todo = [obs for obs in obslist if os.path.basename(obs) not in existing_ids]
+    todo = [] if check_only else [obs for obs in obslist if os.path.basename(obs) not in existing_ids]
     n_skipped = len(obslist) - len(todo)
     if n_skipped:
         logger.debug(f"Skipping {n_skipped} already-spidered folders")
@@ -450,6 +460,11 @@ def run_spider(datapath: str, outdir: str='db', skip_existing: bool=True, max_wo
         logger.warning("No observations found (new or existing); nothing to save.")
         return
 
+    # Which rows' files are still on the server (data gets deleted). One stat per row, threaded as above
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        df['on_disk'] = list(pool.map(os.path.isdir, obs_paths(df, datapath)))
+    logger.info(f"{int(df['on_disk'].sum())} of {len(df)} rows on disk")
+
     filename = datetime.now().strftime(f"{outdir}/%Y-%m-%d.csv")
     logger.info(f"Saving to {filename}")
     df.to_csv(filename, index=False)
@@ -466,12 +481,18 @@ def main(argv=None):
     parser.add_argument("--no-upload", dest="upload", action="store_false", help="skip the rclone upload")
     parser.add_argument("--analyse", action="store_true",
                         help="then build the analysis and calibration_sets workbooks (mccs-analyse) before the upload")
+    parser.add_argument("--check-exists", action="store_true",
+                        help="spider no new folders: only re-check which rows of latest.csv are still on disk")
     args = parser.parse_args(argv)
 
+    # Set up logging here, not on import: importing must not reset handlers other libraries keep ids for
+    logger.remove()
+    logger.add(sys.stderr, format="<level>{level}</level> | {message}", level="INFO")
     now_str = datetime.now().strftime("%Y-%m-%d")
     os.makedirs(args.outdir, exist_ok=True)
     logger.add(f"{args.outdir}/loguru_{now_str}.log", format="<level>{level}</level> | {message}", level="INFO")
-    run_spider(args.datapath, outdir=args.outdir, skip_existing=args.skip_existing, max_workers=args.max_workers)
+    run_spider(args.datapath, outdir=args.outdir, skip_existing=args.skip_existing, max_workers=args.max_workers,
+               check_only=args.check_exists)
 
     if args.analyse:
         from .analyse import main as analyse

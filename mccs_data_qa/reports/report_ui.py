@@ -1979,8 +1979,9 @@ SET_FIELDS = {
     'Failed': 'n_failed',
     'Failed stations': 'failed_stations',
     'Status': 'status',
+    'On disk': 'on_disk',
 }
-DETAIL_COLS = ('Station ID', 'Observation ID', 'UTC Start', 'n_files', 'Duration (s)', 'Status', 'error')
+DETAIL_COLS = ('Station ID', 'Observation ID', 'UTC Start', 'n_files', 'Duration (s)', 'Status', 'error', 'on_disk')
 # Set folder options of mccs-convert-set, filled in by the page
 # quantise has an optional value (--lossy [STEP]), so the page shows it as a switch and a step instead
 CONVERT_SET_ARGS = ('set_id', 'xlsx', 'daq_dir', 'out_dir', 'list', 'quantise')
@@ -2022,6 +2023,7 @@ ACTION_JS = """p => {
   const v = p.value || '';
   if (v === 'running') return '<span class="sets-act busy"><span class="sets-spin"></span>Converting</span>';
   if (v.startsWith('queued')) return `<span class="sets-act busy">Queued #${v.split(' ')[1]}</span>`;
+  if (v === 'missing') return '<span class="sets-act busy" title="No observations of this set are left on the server">Not on disk</span>';
   const [label, cls] = {convert: ['Convert', 'primary'], reconvert: ['Re-convert', 'ghost'],
                         failed: ['Retry', 'warn']}[v] || [v, 'ghost'];
   return `<button class="sets-act ${cls}">${label}</button>`;
@@ -2032,6 +2034,12 @@ QA_JS = f"""p => {{
   return `<span class="sets-link">` + {_chip("hex[p.value] || '#C1C6C8'", "p.value.replace('_', ' ')", "icon[p.value] || 'help_outline'")} + '</span>';
 }}"""
 STATUS_JS = f"""p => {_chip("p.value === 'FAILED' ? '#FFE3E4' : '#E3F5EA'", 'p.value')}"""
+# Observations still on the server out of the set's total; unknown for workbooks built before the check
+ON_DISK_JS = f"""p => {{
+  if (p.value == null) return '<span style="color:#C1C6C8">—</span>';
+  const n = p.data.n_obs, bg = p.value === 0 ? '#FFE3E4' : p.value < n ? '#FFF0D6' : '#E3F5EA';
+  return {_chip('bg', '`${p.value}/${n}`')};
+}}"""
 DAY_JS = """p => p.value ? `<span class="sets-icons"><span class="material-icons">${p.value === 'Day' ? 'wb_sunny' : 'bedtime'}</span>${p.value}</span>` : ''"""
 DAY_ICON_JS = """p => p.value ? `<span class="sets-icons" title="${p.value}"><span class="material-icons">${p.value === 'Day' ? 'wb_sunny' : 'bedtime'}</span></span>` : ''"""
 REPORTS_JS = f"""p => {{
@@ -2081,6 +2089,8 @@ def set_columns() -> list[dict]:
         {'field': 'reports', 'headerName': 'Reports', 'width': 130, ':cellRenderer': REPORTS_JS,
          'headerTooltip': 'Reports run on the set; click to open the set in the report UI'},
         {'field': 'status', 'headerName': 'Status', 'width': 105, ':cellRenderer': STATUS_JS},
+        {'field': 'on_disk', 'headerName': 'On disk', 'width': 105, ':cellRenderer': ON_DISK_JS, **num,
+         'headerTooltip': 'Observations still on the server (Update database > Check files still exist)'},
         {'field': 'lst', 'headerName': 'LST (h)', 'width': 105, ':valueFormatter': 'p => p.value?.toFixed(1)', **num},
         {'field': 'utc', 'headerName': 'UTC', 'width': 95, ':valueFormatter': TIME_JS},
         {'field': 'awst', 'headerName': 'AWST', 'width': 95, ':valueFormatter': TIME_JS},
@@ -2171,6 +2181,8 @@ def set_row_state(row: dict, existing: set[str]) -> dict:
         st['action'] = f'queued {pos}'
     elif r is not None and r.live:
         st['action'] = 'running'
+    elif row.get('on_disk') == 0:  # Nothing left to convert from; None (not checked yet) keeps the button
+        st['action'] = 'missing'
     if d.name not in existing:
         return st
     # mccs-convert-set exits 1 if any EB failed, but still writes the yaml: offer a retry either way
@@ -2220,7 +2232,9 @@ def convert_argv(fields: list[Field], values: dict) -> list[str]:
 
 def tool_label(r: Run) -> str:
     """'Convert set614_2025-03-01' or 'Update database'."""
-    return 'Update database' if r.script == SPIDER else f'Convert {r.dir.parent.parent.name}'
+    if r.script == SPIDER:
+        return 'Check files on disk' if '--check-exists' in r.argv else 'Update database'
+    return f'Convert {r.dir.parent.parent.name}'
 
 
 def tool_status(r: Run) -> tuple[str, str]:
@@ -2244,7 +2258,7 @@ async def sets_page():
         PARSERS[CONVERT] = build_parser()
     fields = [f for f in form_fields(PARSERS[CONVERT]) if f.dest not in CONVERT_SET_ARGS]
     values = FORM_VALUES.setdefault(CONVERT, default_values(fields) | {'lossy': False, 'step': LOSSY_STEP})
-    spider = FORM_VALUES.setdefault(SPIDER, {'all': False, 'upload': True})
+    spider = FORM_VALUES.setdefault(SPIDER, {'mode': 'new', 'all': False, 'upload': True})
 
     def existing() -> set[str]:
         return {p.name for p in root.iterdir()} if root.is_dir() else set()
@@ -2298,6 +2312,9 @@ async def sets_page():
     async def convert(row: dict):
         d = Path(row['folder'])
         conv = convert_dir(d)
+        if row['action'] == 'missing':
+            ui.notify(f'Set {row["set_id"]} is no longer on disk: nothing to convert')
+            return
         if row['action'] == 'running' or row['action'].startswith('queued'):
             show_job(TOOL_RUNS.get(conv) or next(r for r in TOOL_QUEUE if r.dir == conv))
             return
@@ -2333,7 +2350,11 @@ async def sets_page():
             ui.notify('A database update is already running or queued')
             return
         argv = [str(STATE['daq_dir']), f'--outdir={db}', '--analyse']
-        argv += ['--no-skip-existing'] * spider['all'] + ['--no-upload'] * (not spider['upload'])
+        if spider['mode'] == 'check':
+            argv.append('--check-exists')
+        else:
+            argv += ['--no-skip-existing'] * spider['all']
+        argv += ['--no-upload'] * (not spider['upload'])
         show_job(TOOL_RUNS.get(d) or enqueue_tool(d, SPIDER, argv))
 
     async def on_cell(e):
@@ -2381,7 +2402,7 @@ async def sets_page():
                     on_click=lambda: show_job(TOOL_RUNS.get(convert_dir(d)) or Run.load(convert_dir(d))),
                 ).props('flat dense no-caps')
             label = {'convert': 'Convert', 'reconvert': 'Re-convert', 'failed': 'Retry'}.get(row['action'])
-            ui.button(label or row['action'].capitalize(), icon='sync', on_click=lambda: convert(row)).props(
+            ui.button(label or {'missing': 'Not on disk'}.get(row['action']) or row['action'].capitalize(), icon='sync', on_click=lambda: convert(row)).props(
                 'unelevated dense no-caps'
             ).set_enabled(bool(label))
         ui.label(str(d) + ('' if converted else '  (not converted)')).classes('text-xs text-grey-7 font-mono')
@@ -2494,7 +2515,16 @@ async def sets_page():
                         f'Runs mccs-spider on {STATE["daq_dir"]}, then mccs-analyse, rewriting {db}/latest.csv '
                         'and calibration_sets.xlsx. The table reloads when it finishes.'
                     ).classes('text-xs text-grey-7')
-                    ui.switch('Re-spider every folder (slow)').bind_value(spider, 'all')
+                    ui.toggle({'new': 'Spider new folders', 'check': 'Check files still exist'}).bind_value(
+                        spider, 'mode'
+                    ).props('dense no-caps')
+                    ui.label(
+                        'Check files still exist spiders nothing new: it re-checks which observations in '
+                        'latest.csv are still on the server, for the On disk column.'
+                    ).classes('text-xs text-grey-7').bind_visibility_from(spider, 'mode', value='check')
+                    ui.switch('Re-spider every folder (slow)').bind_value(spider, 'all').bind_visibility_from(
+                        spider, 'mode', value='new'
+                    )
                     ui.switch('Upload to acacia (rclone)').bind_value(spider, 'upload')
                     ui.button(
                         'Update now', icon='play_arrow', on_click=lambda: (db_menu.close(), update_db())

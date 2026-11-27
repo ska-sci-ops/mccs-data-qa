@@ -107,9 +107,13 @@ def calibration_sets(df: pd.DataFrame):
         'Failed stations': g['failed_station'].agg(lambda x: ', '.join(v for v in x if v)),
     }).reset_index()
     summary['Status'] = summary['Failed'].map(lambda n: 'FAILED' if n else 'OK')
+    if 'on_disk' in sw:  # Written by mccs-spider; absent from older CSVs
+        sw['on_disk'] = sw['on_disk'].astype(str).str.lower() == 'true'
+        # Observations of the set still on the server
+        summary['On disk'] = summary['Set ID'].map(sw.groupby('Set ID')['on_disk'].sum())
     cols = ['Set ID', 'Date (UTC)', 'LST (hr)', 'Station ID', 'Observation ID', 'pb-id', 'UTC Start',
             'Perth Local Time (AWST)', 'Day/Night (AWST)',
-            'n_channel', 'n_files', 'Duration (s)', 'Status', 'error']
+            'n_channel', 'n_files', 'Duration (s)', 'Status', 'error', 'on_disk']
     detail = sw[[c for c in cols if c in sw.columns]]
     return summary, detail
 
